@@ -8,149 +8,53 @@ import wandb
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Literal
 import logging
-
+from tuned_llama import LlamaWithTunedHead
+from peft import LoraConfig, get_peft_model
 # Set device to GPU if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class LlamaWithTunedHead(nn.Module):
-    def __init__(
-        self, 
-        base_model_path: str, 
-        target_layer: int,
-        loss_type: Literal["perplexity", "kl_divergence", "combined"] = "perplexity",
-        kl_temperature: float = 2.0,
-        dtype: torch.dtype = torch.bfloat16
-    ):
-        super().__init__()
-        self.model = LlamaForCausalLM.from_pretrained(
-            base_model_path,
-            device_map="auto",
-            torch_dtype=dtype
-        )
-        self.target_layer = target_layer
-        self.loss_type = loss_type
-        self.kl_temperature = kl_temperature
-        
-        # Create a copy of the LM head for the target layer
-        self.target_lm_head = nn.Linear(
-            self.model.lm_head.in_features,
-            self.model.lm_head.out_features,
-            bias=False,
-            dtype=dtype
-        )
-
-        # Initialize with the same weights as the original LM head
-        self.target_lm_head.weight.data = self.model.lm_head.weight.data.clone()
-        
-        # Freeze all parameters except the target LM head and target layer
-        for name, param in self.model.named_parameters():
-            param.requires_grad = False
-        
-        # Ensure the target LM head is trainable
-        for param in self.target_lm_head.parameters():
-            param.requires_grad = True
-    
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
-        
-        input_ids = input_ids.to(device)
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(device)
-        if labels is not None:
-            labels = labels.to(device)
-
-        # Get intermediate hidden states and final logits
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            output_hidden_states=True,
-        )
-        
-        loss = None
-        metrics = {}
-        
-        if labels is not None:
-            # Get logits from target layer
-            target_hidden = outputs.hidden_states[self.target_layer]
-            target_logits = self.target_lm_head(target_hidden)
-            
-            # Prepare shifted sequences for loss computation
-            shift_logits = target_logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            full_logits = outputs.logits[..., :-1, :].contiguous()
-            
-            # Compute losses based on selected type
-            if self.loss_type in ["perplexity", "combined"]:
-                loss_fct = nn.CrossEntropyLoss()
-                loss_a = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), 
-                                shift_labels.view(-1))
-                metrics["perplexity_loss"] = loss_a.item()
-                
-                if self.loss_type == "perplexity":
-                    loss = loss_a
-            
-            if self.loss_type in ["kl_divergence", "combined"]:
-                kl_loss = nn.KLDivLoss(reduction="batchmean")
-                loss_b = kl_loss(
-                    F.log_softmax(shift_logits / self.kl_temperature, dim=-1),
-                    F.softmax(full_logits / self.kl_temperature, dim=-1)
-                )
-                metrics["kl_loss"] = loss_b.item()
-                
-                if self.loss_type == "kl_divergence":
-                    loss = loss_b
-            
-            if self.loss_type == "combined":
-                loss = loss_a + loss_b
-        
-        return {
-            "loss": loss,
-            "target_logits": target_logits if labels is not None else None,
-            "full_logits": outputs.logits,
-            "metrics": metrics
-        }
-
 class ShareGPTDataset(Dataset):
     def __init__(self, tokenizer: LlamaTokenizer, max_length: int = 512):
-        self.dataset = load_dataset("liyucheng/ShareGPT90K")["train"]
         self.tokenizer = tokenizer
         self.max_length = max_length
+        self.dataset = self.load_and_preprocess_dataset()
+
+    def load_and_preprocess_dataset(self):
+        preprocessed_dataset = []
+        dataset = load_dataset("liyucheng/ShareGPT90K")["train"]
+        for item in dataset:
+            conversation = ""
+            for turn, content in zip(item["conversations"]["from"], item["conversations"]["value"]):
+                conversation += f"{turn}: {content}\n"
+                if len(conversation) > self.max_length:
+                    break
+            
+            encodings = self.tokenizer(
+                conversation.strip(),
+                max_length=self.max_length,
+                padding="max_length", 
+                truncation=True,
+                return_tensors="pt" # Pytorch tensors
+            )
+            
+            input_ids = encodings["input_ids"].squeeze()
+            attention_mask = encodings["attention_mask"].squeeze()
         
+            preprocessed_dataset.append({
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": input_ids.clone()
+            })
+        return preprocessed_dataset
+
     def __len__(self) -> int:
         return len(self.dataset)
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        item = self.dataset[idx]
-        
-        # Format conversation with roles
-        conversation = ""
-        for turn, content in zip(item["conversations"]["from"], item["conversations"]["value"]):
-            conversation += f"{turn}: {content}\n"
-            
-        encodings = self.tokenizer(
-            conversation.strip(),
-            max_length=self.max_length,
-            padding="max_length", 
-            truncation=True,
-            return_tensors="pt" # Pytorch tensors
-        )
-        
-        input_ids = encodings["input_ids"].squeeze()
-        attention_mask = encodings["attention_mask"].squeeze()
-        
-        return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": input_ids.clone()
-        }
+        return self.dataset[idx]
 
 class CustomTrainer(Trainer):
     def log(self, logs: Dict[str, float], start_time=None):
@@ -169,12 +73,13 @@ def train(
     target_layer: int = 16,
     loss_type: Literal["perplexity", "kl_divergence", "combined"] = "perplexity",
     kl_temperature: float = 2.0,
-    batch_size: int = 8,
+    batch_size: int = 12,
     learning_rate: float = 1e-4,
     num_epochs: int = 3,
     max_length: int = 512,
     gradient_accumulation_steps: int = 2,
     output_dir: str = "llama_tuned_head_output",
+    use_lora: bool = False,
 ):
     # Initialize wandb
     wandb.init(
@@ -189,6 +94,7 @@ def train(
             "max_length": max_length,
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "output_dir": output_dir,
+            "use_lora": use_lora,
         }
     )
     
@@ -196,6 +102,8 @@ def train(
     tokenizer = LlamaTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = ShareGPTDataset(tokenizer, max_length=max_length)
+
+    print("Processed Dataset")
     
     # # Create model with tuned prediction head
     model = LlamaWithTunedHead(
@@ -206,14 +114,16 @@ def train(
         dtype=torch.bfloat16,
     )
 
-    # lora_config = LoraConfig(
-    #     r=8,
-    #     lora_alpha=32,
-    #     target_modules=["target_lm_head"],
-    #     use_rslora=True,
-    #     lora_dropout=0.1,
-    #     bias="none",
-    # )
+    if use_lora:
+        lora_config = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["target_lm_head"],
+            use_rslora=True,
+            lora_dropout=0.1,
+            bias="none",
+        )
+        model = get_peft_model(model, lora_config)
     
     # Training arguments
     training_args = TrainingArguments(
@@ -230,7 +140,7 @@ def train(
         run_name=f"llama-tuned-head-{loss_type}-{target_layer}-{kl_temperature}-{batch_size}-{learning_rate}-{num_epochs}-{max_length}-{gradient_accumulation_steps}"
     )
     
-    # # Initialize trainer with custom logging
+    # Initialize trainer with custom logging
     trainer = CustomTrainer(
         model=model,
         args=training_args,
@@ -254,4 +164,4 @@ if __name__ == "__main__":
     # train(loss_type="perplexity")  # Only Loss A
     # train(loss_type="kl_divergence")  # Only Loss B
     # train(loss_type="combined")  # Both losses
-    train(loss_type="perplexity")
+    train(loss_type="perplexity", use_lora=True)
