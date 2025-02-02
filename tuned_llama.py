@@ -35,7 +35,7 @@ class LlamaWithTunedHead(nn.Module):
         )
 
         # Initialize with the same weights as the original LM head
-        self.target_lm_head.weight.data = self.model.lm_head.weight.data.clone()
+        # self.target_lm_head.weight.data = self.model.lm_head.weight.data.clone()
         
         # Freeze all parameters except the target LM head and target layer
         for name, param in self.model.named_parameters():
@@ -64,7 +64,7 @@ class LlamaWithTunedHead(nn.Module):
             attention_mask=attention_mask,
             labels=labels,
             output_hidden_states=True,
-        )
+        ) 
         
         loss = None
         metrics = {}

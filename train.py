@@ -10,71 +10,41 @@ from typing import Dict, List, Optional, Tuple, Literal
 import logging
 from tuned_llama import LlamaWithTunedHead
 from peft import LoraConfig, get_peft_model
-# Set device to GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from share_gpt_dataloader import ShareGPTDataset
+from truncated_llama import TruncatedLlama
+import pickle
+import math
 
+# Set device to GPU if available
+device = "cuda"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class ShareGPTDataset(Dataset):
-    def __init__(self, tokenizer: LlamaTokenizer, max_length: int = 512):
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.dataset = self.load_and_preprocess_dataset()
 
-    def load_and_preprocess_dataset(self):
-        preprocessed_dataset = []
-        dataset = load_dataset("liyucheng/ShareGPT90K")["train"]
-        for item in dataset:
-            conversation = ""
-            for turn, content in zip(item["conversations"]["from"], item["conversations"]["value"]):
-                conversation += f"{turn}: {content}\n"
-                if len(conversation) > self.max_length:
-                    break
-            
-            encodings = self.tokenizer(
-                conversation.strip(),
-                max_length=self.max_length,
-                padding="max_length", 
-                truncation=True,
-                return_tensors="pt" # Pytorch tensors
-            )
-            
-            input_ids = encodings["input_ids"].squeeze()
-            attention_mask = encodings["attention_mask"].squeeze()
-        
-            preprocessed_dataset.append({
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "labels": input_ids.clone()
-            })
-        return preprocessed_dataset
-
-    def __len__(self) -> int:
-        return len(self.dataset)
-    
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        return self.dataset[idx]
-
-class CustomTrainer(Trainer):
-    def log(self, logs: Dict[str, float], start_time=None):
-        """Custom logging to track individual loss components"""
-        if self.state.epoch is not None:
-            logs["epoch"] = round(self.state.epoch, 4)
-
-        if "metrics" in logs:
-            metrics = logs.pop("metrics")
-            logs.update(metrics)
-
-        super().log(logs)
+max_lr = 3e-4
+min_lr = max_lr * 0.1
+warmup_steps = 5
+max_steps = 100 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
 
 def train(
     model_path: str = "meta-llama/Llama-2-7b-hf",
     target_layer: int = 16,
     loss_type: Literal["perplexity", "kl_divergence", "combined"] = "perplexity",
     kl_temperature: float = 2.0,
-    batch_size: int = 12,
-    learning_rate: float = 1e-4,
+    batch_size: int = 8,
+    learning_rate: float = 3e-4,
     num_epochs: int = 3,
     max_length: int = 512,
     gradient_accumulation_steps: int = 2,
@@ -101,67 +71,60 @@ def train(
     # Load tokenizer and create dataset
     tokenizer = LlamaTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
+
     dataset = ShareGPTDataset(tokenizer, max_length=max_length)
+    model = TruncatedLlama(model_path, num_transformer_layers=target_layer)
+    model.to(device)
+    model.train()
+    torch.set_float32_matmul_precision("high")
+    
+    # Train
+    """
+    effective_batch_size = ~4,000,000 => 4194304
+    actual_batch = 4096
+    dataset size = 1900 * 1400 = ~126,000,000
+    each step = 4s, -> 4000s per batch (about 1 hour)
+    25 hours per epoch ish?
+    """
 
-    print("Processed Dataset")
-    
-    # # Create model with tuned prediction head
-    model = LlamaWithTunedHead(
-        model_path,
-        target_layer,
-        loss_type=loss_type,
-        kl_temperature=kl_temperature,
-        dtype=torch.bfloat16,
-    )
+    optimizer = model.configure_optimizers(0.1, learning_rate, device)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    grad_accumulate_steps = 4194304 // 4096
+    # grad_accumulate_steps = 2
+    print(f"Effective Batch Size {grad_accumulate_steps * batch_size * 4096}")
+    loss_accum = 0.0
+    for step in range(max_steps):
+        if step % 8 == 0 or step == max_steps - 1 or step == 0:
+            trained_params = model.model.lm_head.state_dict()
+            torch.save(trained_params, f"./truncated_llama/llama-trunc-{step}step")
 
-    if use_lora:
-        lora_config = LoraConfig(
-            r=8,
-            lora_alpha=32,
-            target_modules=["target_lm_head"],
-            use_rslora=True,
-            lora_dropout=0.1,
-            bias="none",
-        )
-        model = get_peft_model(model, lora_config)
-    
-    # Training arguments
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,
-        num_train_epochs=num_epochs,
-        logging_steps=10,
-        save_steps=500,
-        save_total_limit=2,
-        bf16=True,
-        report_to="wandb",
-        run_name=f"llama-tuned-head-{loss_type}-{target_layer}-{kl_temperature}-{batch_size}-{learning_rate}-{num_epochs}-{max_length}-{gradient_accumulation_steps}"
-    )
-    
-    # Initialize trainer with custom logging
-    trainer = CustomTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=dataset,
-        data_collator=lambda data: {
-            "input_ids": torch.stack([x["input_ids"] for x in data]),
-            "attention_mask": torch.stack([x["attention_mask"] for x in data]),
-            "labels": torch.stack([x["labels"] for x in data]),
-        },
-    )
-    
-    # # Train
-    trainer.train()
-    
-    # # Save final model
-    trainer.save_model()
+        # Get data tensors, move to device.
+        for mini_step in range(grad_accumulate_steps):
+            next_batch = next(iter(train_loader))
+            input_ids, attention_mask, labels = next_batch["input_ids"], next_batch["attention_mask"], next_batch["labels"]
+            input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
+
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+
+            loss, logits = outputs["loss"], outputs["logits"]
+            loss = loss / grad_accumulate_steps
+            loss_accum += loss.detach()
+            loss.backward()
+
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        lr = get_lr(step)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        optimizer.step()
+        optimizer.zero_grad()
+        print(f"Step {step}, Norm: {norm: .4f}, Loss: {loss_accum}")
+
     wandb.finish()
+
 
 if __name__ == "__main__":
     # Example usage with different loss types:
     # train(loss_type="perplexity")  # Only Loss A
     # train(loss_type="kl_divergence")  # Only Loss B
     # train(loss_type="combined")  # Both losses
-    train(loss_type="perplexity", use_lora=True)
+    train(loss_type="perplexity", target_layer=16, use_lora=False, max_length=4096, batch_size=1)
