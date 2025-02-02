@@ -6,9 +6,11 @@ from transformers.modeling_outputs import MaskedLMOutput
 class TruncatedLlama(nn.Module):
     def __init__(self, model_path: str, num_transformer_layers: int):
         super().__init__()
-        self.model = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+        # self.model = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
+        self.model = LlamaForCausalLM.from_pretrained(model_path)
         self.model.model.layers = self.model.model.layers[:num_transformer_layers]
-        self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False, dtype=torch.bfloat16)
+        # self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False, dtype=torch.bfloat16)
+        self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False)
 
         # Freeze all parameters except the new LM head
         for param in self.model.parameters():
@@ -27,8 +29,8 @@ class TruncatedLlama(nn.Module):
         outputs = self.model(input_ids, attention_mask=attention_mask)
 
         # Remove first token from labels, last token from logits
-        labels = labels[:, 1:]
-        logits = outputs.logits[:, :-1, :]
+        labels = labels[:, 1:].contiguous()
+        logits = outputs.logits[:, :-1, :].contiguous()
 
         # Get loss
         loss = None
@@ -47,8 +49,8 @@ class TruncatedLlama(nn.Module):
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
         # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2 and p.requires_grad]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2 or not p.requires_grad]
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}

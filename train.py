@@ -9,7 +9,6 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple, Literal
 import logging
 from tuned_llama import LlamaWithTunedHead
-from peft import LoraConfig, get_peft_model
 from share_gpt_dataloader import ShareGPTDataset
 from truncated_llama import TruncatedLlama
 import pickle
@@ -23,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 max_lr = 3e-4
 min_lr = max_lr * 0.1
-warmup_steps = 5
-max_steps = 100 # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = 10
+max_steps = 1000
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -72,52 +71,43 @@ def train(
     tokenizer = LlamaTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
 
+    torch.set_float32_matmul_precision("high")
     dataset = ShareGPTDataset(tokenizer, max_length=max_length)
     model = TruncatedLlama(model_path, num_transformer_layers=target_layer)
     model.to(device)
     model.train()
-    torch.set_float32_matmul_precision("high")
-    
-    # Train
-    """
-    effective_batch_size = ~4,000,000 => 4194304
-    actual_batch = 4096
-    dataset size = 1900 * 1400 = ~126,000,000
-    each step = 4s, -> 4000s per batch (about 1 hour)
-    25 hours per epoch ish?
-    """
-
+    model = torch.compile(model)
     optimizer = model.configure_optimizers(0.1, learning_rate, device)
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    grad_accumulate_steps = 4194304 // 4096
-    # grad_accumulate_steps = 2
+    grad_accumulate_steps = 4227072 // (batch_size * 4096)
     print(f"Effective Batch Size {grad_accumulate_steps * batch_size * 4096}")
-    loss_accum = 0.0
+    print(f"Inner Loop Steps {grad_accumulate_steps}")
     for step in range(max_steps):
-        if step % 8 == 0 or step == max_steps - 1 or step == 0:
+        if step % 8 == 0 or step == max_steps - 1:
             trained_params = model.model.lm_head.state_dict()
             torch.save(trained_params, f"./truncated_llama/llama-trunc-{step}step")
 
         # Get data tensors, move to device.
+        loss_accum = 0.0
         for mini_step in range(grad_accumulate_steps):
             next_batch = next(iter(train_loader))
             input_ids, attention_mask, labels = next_batch["input_ids"], next_batch["attention_mask"], next_batch["labels"]
             input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
 
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
 
             loss, logits = outputs["loss"], outputs["logits"]
-            loss = loss / grad_accumulate_steps
+            loss = loss / grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
             loss_accum += loss.detach()
             loss.backward()
-
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         lr = get_lr(step)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
         optimizer.step()
         optimizer.zero_grad()
-        print(f"Step {step}, Norm: {norm: .4f}, Loss: {loss_accum}")
+        print(f"Step {step}, Norm: {norm: .4f}, Loss: {loss_accum}, lr: {lr}")
 
     wandb.finish()
 
@@ -127,4 +117,4 @@ if __name__ == "__main__":
     # train(loss_type="perplexity")  # Only Loss A
     # train(loss_type="kl_divergence")  # Only Loss B
     # train(loss_type="combined")  # Both losses
-    train(loss_type="perplexity", target_layer=16, use_lora=False, max_length=4096, batch_size=1)
+    train(loss_type="perplexity", target_layer=16, use_lora=False, max_length=4096, batch_size=24)
