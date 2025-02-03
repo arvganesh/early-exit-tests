@@ -27,14 +27,13 @@ class TruncatedLlama(nn.Module):
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None):
         # Get logits from model
         outputs = self.model(input_ids, attention_mask=attention_mask)
-
-        # Remove first token from labels, last token from logits
-        labels = labels[:, 1:].contiguous()
-        logits = outputs.logits[:, :-1, :].contiguous()
+        logits = outputs.logits
 
         # Get loss
         loss = None
         if labels is not None:
+            labels = labels[:, 1:].contiguous()
+            logits = logits[:, :-1, :].contiguous()
             loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
 
         return MaskedLMOutput(
@@ -65,5 +64,11 @@ class TruncatedLlama(nn.Module):
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
         return optimizer
 
-if __name__ == "__main__":
-    model = TruncatedLlama("meta-llama/Llama-2-7b-hf", 16)
+    def generate(self, input_ids: torch.Tensor, max_length: int):
+        for i in range(max_length):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outputs = self(input_ids)
+            logits = outputs.logits
+            next_token = torch.multinomial(torch.softmax(logits[:, -1, :], dim=-1), num_samples=1)
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+        return input_ids

@@ -1,52 +1,38 @@
-from tuned_llama import LlamaWithTunedHead
-from safetensors.torch import load_model
-from transformers import LlamaTokenizer
 import torch
 import os
-from peft import get_peft_model, LoraConfig, PeftModel
+from transformers import LlamaTokenizer
+
+from truncated_llama import TruncatedLlama
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 def eval(
     model_path: str = "meta-llama/Llama-2-7b-hf",
     target_layer: int = 16,
-    loss_type: str = "perplexity",
-    kl_temperature: float = 2.0,
-    batch_size: int = 8,
-    learning_rate: float = 1e-4,
-    num_epochs: int = 3,
-    max_length: int = 512,
-    gradient_accumulation_steps: int = 2,
-    output_dir: str = "llama_tuned_head_output/checkpoint-1000",
-    use_lora: bool = True
 ):
     # Setup Tokenizer, load model, move to device.
     tokenizer = LlamaTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
 
-    model = LlamaWithTunedHead(
+    model = TruncatedLlama(
         model_path,
-        target_layer,
-        loss_type=loss_type,
-        kl_temperature=kl_temperature,
-        dtype=torch.bfloat16,
-        device=device
+        target_layer
     )
-
-    if use_lora:
-        model = PeftModel.from_pretrained(model, output_dir)
-
-    model.to(device)
+    weights = torch.load("./truncated_llama_on_slimPJ6B/llama-trunc-350step")
+    model.model.lm_head.load_state_dict(weights["trained_params"])
     model.eval()
+    model.to(device)
 
     print(f"Loaded model {model_path} to {device}")
-    print(f"Number of trainable parameters: {model.num_trainable_params()}")
 
     # Manual Evaluation
-    input_str = "Hello, how are you?"
-    input_ids = tokenizer(input_str, return_tensors="pt").input_ids.to(device)
-    for i in range(10):
-        outputs = model.generate(input_ids, max_length=10)
-        print(tokenizer.batch_decode(outputs, skip_special_tokens=True))
+    input_str = "Hello"
+    input_ids = tokenizer.encode(input_str, return_tensors="pt")
+    input_ids = input_ids.to(device)
+    print(input_ids)
+    for i in range(5):
+        outputs = model.generate(input_ids, max_length=20)
+        print(tokenizer.batch_decode(outputs, skip_special_tokens=False))
 
 if __name__ == "__main__":
     eval()
