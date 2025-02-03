@@ -32,7 +32,7 @@ def train(
 
     max_lr = learning_rate
     min_lr = max_lr * 0.1
-    warmup_steps = 5
+    warmup_steps = 10
     token_total = 500000000 * 10
     num_tok_per_batch = 4227072
     max_steps = token_total // num_tok_per_batch
@@ -101,7 +101,7 @@ def train(
 
     # Training stats.
     train_time_hrs = max_steps * 180 / 3600
-    rate = 2.49
+    rate = 1.49
     print("Estimated Training Time: ", train_time_hrs, "hours")
     print(f"Cost: {train_time_hrs * rate} USD")
     for step in range(max_steps):
@@ -121,7 +121,7 @@ def train(
                     val_accum += val_loss.detach()
 
             # save optimizer state
-            if step % 50 == 0 or step == max_steps - 1:
+            if step % 50 == 0 or step == max_steps - 1 or step == 0:
                 optimizer_state = optimizer.state_dict()
                 trained_params = model.model.lm_head.state_dict()
                 torch.save({
@@ -129,7 +129,7 @@ def train(
                     "trained_params": trained_params,
                     "step": step,
                     "val_loss": val_accum
-                }, f"./truncated_llama_on_slimPJ6B/llama-trunc-{step}step")
+                }, f"./models/highLR/llama-trunc-{step}step")
 
             wandb.log({"val/loss": val_accum})
             print(f"Step {step}, Val Loss: {val_accum}")
@@ -180,4 +180,4 @@ if __name__ == "__main__":
     # train(loss_type="perplexity")  # Only Loss A
     # train(loss_type="kl_divergence")  # Only Loss B
     # train(loss_type="combined")  # Both losses
-    train(loss_type="perplexity", target_layer=16, max_length=4096, batch_size=16)
+    train(loss_type="perplexity", target_layer=16, max_length=4096, batch_size=24, learning_rate=1e-3)

@@ -9,4 +9,6 @@ dependencies = [
   "transformers>=4.36.0",
   "wandb>=0.15.0",
   "numpy>=1.26.0",
+  "huggingface-cli",
+  "sentencepiece",
 ]
