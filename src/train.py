@@ -44,15 +44,16 @@ def train(
     #     assert 0 <= decay_ratio <= 1
     #     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     #     return min_lr + coeff * (max_lr - min_lr)
+
     # Load tokenizer and create dataset.
     tokenizer = LlamaTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
 
     # Setup for mixed precision training.
     torch.set_float32_matmul_precision("high")
-    model = TruncatedLlama(model_path, num_transformer_layers=target_layer)
+    model = TruncatedLlama(model_path, num_transformer_layers=target_layer, use_flash_attn=False)
     model.train()
-    # model = torch.compile(model)
+    model = torch.compile(model)
     model.to(device)
 
     ## Training Loop
@@ -69,26 +70,17 @@ def train(
     # train_dataset = ShareGPTDataset(tokenizer, max_length=max_length)
 
     # Uncomment to use SlimPJ
-    # Average tokens per entry ~2000, but it's pretty evenly distributed between 0 - 4k.
-    # Median is 2000
+    # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
+    # validation_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="validation", num_proc=8)
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
+    # val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=True)
 
     max_lr = learning_rate
     min_lr = max_lr * 0.1
-    num_tok_per_batch = 4227072
     max_steps = len(train_dataset) // batch_size
     warmup_steps = max_steps * 0.10
-
-
-    train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
-    validation_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="validation", num_proc=8)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
-    val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=True)
-
-    # Llama paper says the batch size was ~4M tokens.
     grad_accumulate_steps = 1
     val_steps = len(val_loader) // batch_size
-    # print(f"Effective Batch Size {grad_accumulate_steps * batch_size * 4096}")
-    # print(f"Inner Loop Steps {grad_accumulate_steps}")
 
     # Initialize wandb
     wandb.init(
@@ -106,48 +98,44 @@ def train(
     )
 
     # Training stats.
-    # train_time_hrs = max_steps * 180 / 3600
-    # rate = 1.49
-    # print("Estimated Training Time: ", train_time_hrs, "hours")
-    # print(f"Cost: {train_time_hrs * rate} USD")
+    print(f"Max Steps: {max_steps}")
+    print(f"Effective Batch Size: {grad_accumulate_steps * batch_size * 4096}")
     for step in range(max_steps):
         # Run model on validation data every 50 steps.
-        if step % 500 == 0 or step == 0:
-            model.eval()
-            val_accum = 0.0
-            start_time = time.time()
-            with torch.no_grad():
-                for batch_idx, batch in enumerate(val_loader):
-                    if batch_idx >= 100:
-                        break
-                    input_ids, attention_mask, labels = batch["input_ids"], batch["attention_mask"], batch["labels"]
-                    input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
-                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                        outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-                    val_loss = outputs.loss
-                    val_loss /= grad_accumulate_steps
-                    val_accum += val_loss.detach()
-            torch.cuda.synchronize()
-            end_time = time.time()
-            print(f"Validation Time: {end_time - start_time}")
+        # if step % 500 == 0 or step == 0:
+        #     model.eval()
+        #     val_accum = 0.0
+        #     start_time = time.time()
+        #     with torch.no_grad():
+        #         for batch_idx, batch in enumerate(val_loader):
+        #             if batch_idx >= 100:
+        #                 break
+        #             input_ids, attention_mask, labels = batch["input_ids"], batch["attention_mask"], batch["labels"]
+        #             input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
+        #             with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        #                 outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+        #             val_loss = outputs.loss
+        #             val_loss /= grad_accumulate_steps
+        #             val_accum += val_loss.detach()
+        #     end_time = time.time()
+        #     print(f"Validation Time: {end_time - start_time}")
             # save optimizer state
-            if step % 1000 == 0 or step == max_steps - 1 or step == 0:
-                optimizer_state = optimizer.state_dict()
-                trained_params = model.model.lm_head.state_dict()
-                torch.save({
-                    "optimizer_state": optimizer_state,
-                    "trained_params": trained_params,
-                    "step": step,
-                    "val_loss": val_accum
-                }, f"./models/xsum1/llama-trunc-{step}step")
+        if step % 1000 == 0 or step == max_steps - 1:
+            optimizer_state = optimizer.state_dict()
+            trained_params = model.model.lm_head.state_dict()
+            torch.save({
+                "optimizer_state": optimizer_state,
+                "trained_params": trained_params,
+                "step": step,
+                # "val_loss": val_accum
+            }, f"./models/xsum1/llama-trunc-{step}step")
 
-            wandb.log({"val/loss": val_accum})
-            print(f"Step {step}, Val Loss: {val_accum}")
-            model.train()
+        # wandb.log({"val/loss": val_accum})
+        # print(f"Step {step}, Val Loss: {val_accum}")
         
         # Generate from model every 100 steps.
         # .generate() uses autocast.
-        if step % 1000 == 0 or step == 0:
+        if step % 100 == 0 or step == max_steps - 1:
             prompt = "Hi! I'm a language model."
             input_ids = tokenizer.encode(prompt, return_tensors="pt")
             input_ids = input_ids.to(device)
@@ -175,13 +163,9 @@ def train(
             loss = loss / grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
             loss_accum += loss.detach()
             loss.backward()
-        torch.cuda.synchronize()
         end_time = time.time()
-        print(f"Training Time: {end_time - start_time}")
+        print(f"Training Time: {end_time - start_time}, Tokens per second: {grad_accumulate_steps * batch_size * 4096 / (end_time - start_time)}")
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        # lr = get_lr(step)
-        # for param_group in optimizer.param_groups:
-        #     param_group['lr'] = lr
         optimizer.step()
         optimizer.zero_grad()
         wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": optimizer.param_groups[0]["lr"]})
@@ -190,8 +174,4 @@ def train(
 
 
 if __name__ == "__main__":
-    # Example usage with different loss types:
-    # train(loss_type="perplexity")  # Only Loss A
-    # train(loss_type="kl_divergence")  # Only Loss B
-    # train(loss_type="combined")  # Both losses
-    train(loss_type="perplexity", target_layer=16, max_length=4096, batch_size=24, learning_rate=1e-5)
+    train(model_path="meta-llama/Llama-2-7b-chat-hf", loss_type="perplexity", target_layer=16, max_length=4096, batch_size=12, learning_rate=1e-5)

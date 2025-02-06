@@ -4,10 +4,13 @@ from transformers import LlamaForCausalLM, Trainer, TrainingArguments
 from transformers.modeling_outputs import MaskedLMOutput
 
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, num_transformer_layers: int):
+    def __init__(self, model_path: str, num_transformer_layers: int, use_flash_attn: bool = False):
         super().__init__()
         # self.model = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
-        self.model = LlamaForCausalLM.from_pretrained(model_path)
+        if use_flash_attn:
+            self.model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
+        else:
+            self.model = LlamaForCausalLM.from_pretrained(model_path)
         self.model.model.layers = self.model.model.layers[:num_transformer_layers]
         # self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False, dtype=torch.bfloat16)
         self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False)
@@ -27,14 +30,12 @@ class TruncatedLlama(nn.Module):
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None):
         # Get logits from model
         outputs = self.model(input_ids, attention_mask=attention_mask)
-        logits = outputs.logits
+        logits = outputs.logits # shape: (batch_size, seq_len, vocab_size)
 
         # Get loss
         loss = None
         if labels is not None:
-            labels = labels[:, 1:].contiguous()
-            logits = logits[:, :-1, :].contiguous()
-            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-1)
 
         return MaskedLMOutput(
                 loss=loss,
