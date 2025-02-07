@@ -2,50 +2,75 @@ from torch.utils.data import Dataset, IterableDataset
 from datasets import load_dataset
 import torch
 from typing import Dict
-class XSUMDataset(IterableDataset):
+class XSUMDataset(Dataset):
     def __init__(self, tokenizer, max_length: int = 512, split: str = "train", num_proc: int = 8):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.dataset = load_dataset("EdinburghNLP/xsum", split=split, num_proc=num_proc)
+        self.dataset = self.preprocess(self.dataset)
+        self.pad_token = -100
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+    def preprocess(self, dataset):
+        # remove indices where doc + summary > self.max_length
+        dataset = dataset.filter(lambda x: len(x["document"]) + len(x["summary"]) <= self.max_length)
+        return dataset
     
-    def __iter__(self):
-        for i in range(len(self.dataset)):
-            doc_text = self.dataset[i]["document"].strip()
-            sum_text = (" TL;DR: " + self.dataset[i]["summary"]).strip()
-            if len(doc_text + sum_text) <= self.max_length:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        doc_text = (self.dataset[idx]["document"] + " TL;DR: ").strip()
+        sum_text = self.dataset[idx]["summary"].strip()
+        if len(doc_text + sum_text) <= self.max_length:
                 doc_encodings = self.tokenizer(
                     doc_text,
                     max_length=self.max_length,
                     truncation=True,
+                    add_special_tokens=True, # Adds BOS Token.
                     return_tensors="pt" # Pytorch tensors
                 )
 
                 summary_encodings = self.tokenizer(
-                    " TL;DR: " + self.dataset[i]["summary"].strip(),
-                    max_length=self.max_length,
+                    sum_text,
+                    max_length=self.max_length - 1,
                     truncation=True,
+                    add_special_tokens=False,
                     return_tensors="pt" # Pytorch tensors
                 )
 
-                input_ids = doc_encodings["input_ids"].squeeze() + summary_encodings["input_ids"].squeeze()
-                attention_mask = doc_encodings["attention_mask"].squeeze()
-                labels = input_ids.clone()[1:]
-                labels = torch.cat((labels, torch.tensor([-100])))
+                """
+                (Prompt, Target) pair looks like:
 
-                yield {
+                # Labels should be:
+                structure: <bos> <document> " TL;DR: " <summary> <eos> <pad>
+                input_ids: <bos> <d1> ... <dN> <tl1> <tl2> <s1> ... <sM> <eos> <pad>
+                labels:    -100 -100 ... -100  -100  <s1>  <s2> ... <eos> -100 -100
+                """
+
+                summary_encodings["input_ids"] = torch.cat((summary_encodings["input_ids"].squeeze(), torch.tensor([self.tokenizer.eos_token_id])))
+                doc_tokens = doc_encodings["input_ids"].squeeze() 
+                summary_tokens = summary_encodings["input_ids"].squeeze()
+                num_pad = self.max_length - len(summary_tokens) - len(doc_tokens)
+
+                input_ids = torch.cat((doc_tokens, summary_tokens, torch.tensor([self.pad_token] * num_pad)))
+                labels = torch.tensor([self.pad_token] * self.max_length)
+                labels[len(doc_tokens) - 1:len(doc_tokens) + len(summary_tokens) - 1] = summary_tokens.clone()
+                
+                assert len(input_ids) == self.max_length
+                assert len(labels) == self.max_length
+
+                # Make sure labels are shifted.
+                return     {
                     "input_ids": input_ids,
-                    "attention_mask": attention_mask,
+                    "attention_mask": None,
                     "labels": labels
                 }
     
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        doc_text = self.dataset[idx]["document"]
-        summary_text = self.dataset[idx]["summary"]
-        if len(doc_text) > self.max_length:
-            doc_text = doc_text[:self.max_length]
+    # def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    #     doc_text = self.dataset[idx]["document"]
+    #     summary_text = self.dataset[idx]["summary"]
+    #     if len(doc_text) > self.max_length:
+    #         doc_text = doc_text[:self.max_length]
         
         # input_encodings = self.tokenizer(
         #     input_text.strip(),
