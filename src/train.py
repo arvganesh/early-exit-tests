@@ -1,3 +1,4 @@
+import os; os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,8 +58,6 @@ def train(
     model.to(device)
 
     ## Training Loop
-    # Weight decay, initial learning rate, set basic hyperparams.
-    optimizer = model.configure_optimizers(0.0, learning_rate, device)
 
     # Uncomment to use XSUM
     train_dataset = XSUMDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -78,9 +77,22 @@ def train(
     max_lr = learning_rate
     min_lr = max_lr * 0.1
     max_steps = len(train_dataset) // batch_size
-    warmup_steps = max_steps * 0.10
+    warmup_steps = max_steps * 0.05
     grad_accumulate_steps = 1
     val_steps = len(val_loader) // batch_size
+    lr_decay = False
+    weight_decay = 0.01
+
+    # Linear learning rate scheduler with warmup + decay
+    def get_lr(it, decay=False):
+        if it < warmup_steps:
+            return max_lr * (it+1) / warmup_steps
+        if decay:
+            if it > max_steps:
+                return min_lr
+            return min_lr + (max_lr - min_lr) * (max_steps - it) / (max_steps - warmup_steps)
+        else:
+            return max_lr
 
     # Initialize wandb
     wandb.init(
@@ -94,32 +106,39 @@ def train(
             "max_length": max_length,
             "output_dir": output_dir,
             "warmup steps": warmup_steps,
+            "LR decay": lr_decay,
+            "weight_decay": weight_decay
         }
     )
 
+    # Weight decay, initial learning rate, set basic hyperparams.
+    optimizer = model.configure_optimizers(weight_decay, learning_rate, device)
+
     # Training stats.
     print(f"Max Steps: {max_steps}")
+    print(f"Warmup Steps: {warmup_steps}")
     print(f"Effective Batch Size: {grad_accumulate_steps * batch_size * 4096}")
     for step in range(max_steps):
         # Run model on validation data every 50 steps.
-        # if step % 500 == 0 or step == 0:
-        #     model.eval()
-        #     val_accum = 0.0
-        #     start_time = time.time()
-        #     with torch.no_grad():
-        #         for batch_idx, batch in enumerate(val_loader):
-        #             if batch_idx >= 100:
-        #                 break
-        #             input_ids, attention_mask, labels = batch["input_ids"], batch["attention_mask"], batch["labels"]
-        #             input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
-        #             with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        #                 outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-        #             val_loss = outputs.loss
-        #             val_loss /= grad_accumulate_steps
-        #             val_accum += val_loss.detach()
-        #     end_time = time.time()
-        #     print(f"Validation Time: {end_time - start_time}")
-            # save optimizer state
+        if step % 500 == 0 or step == 0:
+            model.eval()
+            val_accum = 0.0
+            with torch.no_grad():
+                for batch_idx, batch in enumerate(val_loader):
+                    if batch_idx >= 10:
+                        break
+                    input_ids, labels = batch["input_ids"], batch["labels"]
+                    input_ids, labels = input_ids.to(device), labels.to(device)
+                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                        outputs = model(input_ids, labels=labels)
+                    val_loss = outputs.loss
+                    val_loss /= grad_accumulate_steps
+                    val_accum += val_loss.detach()
+            model.train()
+            print(f"Validation Loss: {val_accum}")
+            wandb.log({"val/loss": val_accum})
+        
+        # save optimizer state
         if step % 1000 == 0 or step == max_steps - 1:
             optimizer_state = optimizer.state_dict()
             trained_params = model.model.lm_head.state_dict()
@@ -129,9 +148,6 @@ def train(
                 "step": step,
                 # "val_loss": val_accum
             }, f"./models/xsum1/llama-trunc-{step}step")
-
-        # wandb.log({"val/loss": val_accum})
-        # print(f"Step {step}, Val Loss: {val_accum}")
         
         # Generate from model every 100 steps.
         # .generate() uses autocast.
@@ -142,7 +158,7 @@ def train(
             model.eval()
             with torch.no_grad():
                 for i in range(10):
-                    outputs = model.generate(input_ids, max_length=20)
+                    outputs = model.generate(input_ids, max_length=20, eos_token_id=tokenizer.eos_token_id)
                     s = tokenizer.batch_decode(outputs, skip_special_tokens=True)
                     print(s)
                     wandb.log({"gen/output": s})
@@ -150,28 +166,36 @@ def train(
 
         # Get data tensors, move to device.
         loss_accum = 0.0
-        start_time = time.time()
+        # start_time = time.time()
         for mini_step in range(grad_accumulate_steps):
             next_batch = next(iter(train_loader))
-            input_ids, attention_mask, labels = next_batch["input_ids"], next_batch["attention_mask"], next_batch["labels"]
-            input_ids, attention_mask, labels = input_ids.to(device), attention_mask.to(device), labels.to(device)
+            input_ids, labels = next_batch["input_ids"], next_batch["labels"]
+            input_ids, labels = input_ids.to(device), labels.to(device)
 
             with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+                outputs = model(input_ids, labels=labels)
 
             loss, logits = outputs["loss"], outputs["logits"]
             loss = loss / grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
             loss_accum += loss.detach()
             loss.backward()
-        end_time = time.time()
-        print(f"Training Time: {end_time - start_time}, Tokens per second: {grad_accumulate_steps * batch_size * 4096 / (end_time - start_time)}")
+
+        # Clip gradients and step.
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        lr = get_lr(step, lr_decay)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         optimizer.step()
         optimizer.zero_grad()
-        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": optimizer.param_groups[0]["lr"]})
-        print(f"Step {step}, Train Loss: {loss_accum}")
+        # torch.cuda.synchronize()
+        # end_time = time.time()
+
+        # Log training stats.
+        # print(f"Training Time: {end_time - start_time}, Tokens per second: {grad_accumulate_steps * batch_size * 4096 / (end_time - start_time)}")
+        print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {lr}")
+        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": lr})
     wandb.finish()
 
 
 if __name__ == "__main__":
-    train(model_path="meta-llama/Llama-2-7b-chat-hf", loss_type="perplexity", target_layer=16, max_length=4096, batch_size=12, learning_rate=1e-5)
+    train(model_path="meta-llama/Llama-2-7b-chat-hf", loss_type="perplexity", target_layer=16, max_length=4096, batch_size=24, learning_rate=2e-5)
