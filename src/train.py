@@ -62,6 +62,9 @@ def train(
     # Uncomment to use XSUM
     train_dataset = XSUMDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
     validation_dataset = XSUMDataset(tokenizer, max_length=max_length, split="validation", num_proc=8)
+
+    import pdb; pdb.set_trace()
+
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
     val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=True)
 

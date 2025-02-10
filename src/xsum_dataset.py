@@ -7,7 +7,7 @@ class XSUMDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.dataset = self.preprocess(load_dataset("EdinburghNLP/xsum", split=split, num_proc=num_proc))
-        self.pad_token = -100
+        self.ignore_in_loss_token_id = -100
         self.should_pad = should_pad
 
     def __len__(self) -> int:
@@ -53,8 +53,8 @@ class XSUMDataset(Dataset):
         summary_tokens = summary_encodings["input_ids"].squeeze()
         num_pad = self.max_length - len(summary_tokens) - len(doc_tokens)
 
-        input_ids = torch.cat((doc_tokens, summary_tokens, torch.tensor([self.pad_token] * num_pad)))
-        labels = torch.tensor([self.pad_token] * self.max_length)
+        input_ids = torch.cat((doc_tokens, summary_tokens, torch.tensor([self.tokenizer.pad_token_id] * num_pad)))
+        labels = torch.tensor([self.ignore_in_loss_token_id] * self.max_length)
         labels[len(doc_tokens) - 1:len(doc_tokens) + len(summary_tokens) - 1] = summary_tokens.clone()
 
         assert input_ids != None

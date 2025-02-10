@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoTokenizer
 from transformers.modeling_outputs import MaskedLMOutput
-from typing import List, Tuple, Float, Bool
+from typing import List, Tuple
 
 class TruncatedLlama(nn.Module):
     def __init__(self, model_path: str, num_transformer_layers: int, use_flash_attn: bool = False):
@@ -104,7 +104,7 @@ class TruncatedLlamaWrapper(lm_eval.api.model.LM):
         # Return the maximum number of tokens to generate
         return 256  # Adjust as needed
         
-    def loglikelihood(self, requests: List[Instance]) -> List[Tuple[Float, Bool]]:
+    def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         results = []
         for request in requests:
             # Tokenize context and continuation
@@ -145,7 +145,7 @@ class TruncatedLlamaWrapper(lm_eval.api.model.LM):
         
         return results
     
-    def loglikelihood_rolling(self, requests: List[Instance]) -> List[Tuple[Float, Bool]]:
+    def loglikelihood_rolling(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         results = []
         for request in requests:
             # Tokenize the full sequence
