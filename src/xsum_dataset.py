@@ -3,11 +3,12 @@ from datasets import load_dataset
 import torch
 from typing import Dict
 class XSUMDataset(Dataset):
-    def __init__(self, tokenizer, max_length: int = 512, split: str = "train", num_proc: int = 8):
+    def __init__(self, tokenizer, max_length: int = 512, split: str = "train", num_proc: int = 8, should_pad=True):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.dataset = self.preprocess(load_dataset("EdinburghNLP/xsum", split=split, num_proc=num_proc))
         self.pad_token = -100
+        self.should_pad = should_pad
 
     def __len__(self) -> int:
         return len(self.dataset)
