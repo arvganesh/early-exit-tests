@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from transformers import LlamaForCausalLM, Trainer, TrainingArguments
+from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoTokenizer
 from transformers.modeling_outputs import MaskedLMOutput
+from typing import List, Tuple, Float, Bool
 
 class TruncatedLlama(nn.Module):
     def __init__(self, model_path: str, num_transformer_layers: int, use_flash_attn: bool = False):
@@ -76,11 +77,16 @@ class TruncatedLlama(nn.Module):
                 break
         return input_ids
 
-class TruncatedLlamaWrapper(LM):
+import lm_eval
+from lm_eval.api.instance import Instance
+import torch.nn.functional as F
+
+class TruncatedLlamaWrapper(lm_eval.api.model.LM):
     def __init__(self, model, tokenizer):
         super().__init__()
         self.model = model
         self.tokenizer = tokenizer
+        self.tokenizer.pad_token = tokenizer.eos_token
         self.device = next(model.parameters()).device
         
     @property
@@ -98,10 +104,11 @@ class TruncatedLlamaWrapper(LM):
         # Return the maximum number of tokens to generate
         return 256  # Adjust as needed
         
-    def loglikelihood(self, requests) -> List[Tuple[float, bool]]:
+    def loglikelihood(self, requests: List[Instance]) -> List[Tuple[Float, Bool]]:
         results = []
-        for context, continuation in requests:
+        for request in requests:
             # Tokenize context and continuation
+            context, continuation = request.args()
             context_tokens = self.tokenizer.encode(context, add_special_tokens=False)
             continuation_tokens = self.tokenizer.encode(continuation, add_special_tokens=False)
             
@@ -113,13 +120,13 @@ class TruncatedLlamaWrapper(LM):
                 [[-100] * len(context_tokens) + continuation_tokens], 
                 device=self.device
             )
-            
+        
             with torch.no_grad():
                 outputs = self.model(input_ids, labels=labels)
                 logits = outputs.logits
                 
                 # Get logits for continuation tokens only
-                cont_logits = logits[0, len(context_tokens)-1:-1]
+                cont_logits = logits[0, len(context_tokens)-1:-1] # removes last token legits
                 cont_tokens = input_ids[0, len(context_tokens):]
                 
                 # Calculate log likelihood
@@ -138,32 +145,49 @@ class TruncatedLlamaWrapper(LM):
         
         return results
     
-    def loglikelihood_rolling(self, requests) -> List[float]:
+    def loglikelihood_rolling(self, requests: List[Instance]) -> List[Tuple[Float, Bool]]:
         results = []
-        for context, continuation in requests:
+        for request in requests:
             # Tokenize the full sequence
-            tokens = self.tokenizer.encode(context + continuation, add_special_tokens=False)
+            text = request.args()
+            tokens = self.tokenizer.encode(text, add_special_tokens=True)
             tokens = torch.tensor([tokens], device=self.device)
+
+            # how this all works (illustrated on a causal decoder-only setup):
+                #          CTX      CONT
+                # inp    0 1 2 3|4 5 6 7 8 9   <- last token is deleted by inp[:, :-1]
+                # model  \               \
+                # logits   1 2 3|4 5 6 7 8 9   <- the ctx half gets tossed out by the
+                # cont_toks      4 5 6 7 8 9      [:, -len(continuation_enc):, :self.vocab_size] slice # noqa: E501
             
             # Calculate log likelihood token by token
             total_log_prob = 0.0
-            for i in range(len(context), len(context) + len(continuation)):
-                input_ids = tokens[:, :i+1]
-                with torch.no_grad():
-                    outputs = self.model(input_ids)
-                    logits = outputs.logits[:, -1]
-                    log_probs = F.log_softmax(logits, dim=-1)
-                    total_log_prob += log_probs[0, tokens[0, i]].item()
-            
-            results.append(total_log_prob)
+            with torch.no_grad():
+                outputs = self.model(tokens)
+                logits = outputs.logits[:, :-1] # Remove last logit
+                tokens = tokens[1:] # Remove first token (b/c we don't care about the probability of the start token being generated)
+                log_probs = F.log_softmax(logits, dim=-1) # 1, seq length, vocab size (normalized)
+                for i in range(len(tokens)):
+                    total_log_prob += log_probs[0, tokens[0, i]].item() # 
+
+            # Check if the continuation is greedy
+            is_greedy = True
+            log_probs = log_probs[0]
+            for logits_i, token_i in zip(log_probs, tokens):
+                if torch.argmax(logits_i).item() != token_i.item():
+                    is_greedy = False
+                    break
+        
+            results.append((total_log_prob, is_greedy))
         
         return results
     
-    def generate_until(self, requests) -> List[str]:
+    def generate_until(self, requests: List[Instance]) -> List[str]:
         results = []
-        for context, until in requests:
+        for request in requests:
             # Tokenize context
-            input_ids = self.tokenizer.encode(context, return_tensors="pt").to(self.device)
+            input_str, kwargs = request.args()
+            input_ids = self.tokenizer.encode(input_str, return_tensors="pt").to(self.device)
             
             generated_tokens = []
             max_new_tokens = self.max_gen_toks
@@ -198,3 +222,11 @@ class TruncatedLlamaWrapper(LM):
             results.append(generated_text)
         
         return results
+    
+
+if __name__ == "__main__":
+    model_path = "meta-llama/llama-2-7B-hf"
+    mdl = TruncatedLlamaWrapper(TruncatedLlama(model_path), AutoTokenizer.from_pretrained(model_path))
+    inst = Instance()
+    inst.arguments = "Hi! What's the probability of this?"
+    print(mdl.loglikelihood([inst]))
