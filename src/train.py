@@ -17,6 +17,9 @@ import pickle
 import math
 from share_gpt_dataloader import ShareGPTDataset
 import time
+import argparse
+
+
 def train(
     model_path: str = "meta-llama/Llama-2-7b-hf",
     target_layer: int = 16,
@@ -201,4 +204,67 @@ def train(
 
 
 if __name__ == "__main__":
-    train(model_path="meta-llama/Llama-2-7b-chat-hf", loss_type="perplexity", target_layer=16, max_length=4096, batch_size=24, learning_rate=2e-5)
+    parser = argparse.ArgumentParser(description="Train a truncated Llama model with a tuned head.")
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        default="meta-llama/Llama-2-7b-chat-hf",
+        help="Path to the model checkpoint or model identifier."
+    )
+    parser.add_argument(
+        "--target_layer",
+        type=int,
+        default=16,
+        help="The transformer layer number that you want to target."
+    )
+    parser.add_argument(
+        "--loss_type",
+        type=str,
+        choices=["perplexity", "kl_divergence", "combined"],
+        default="perplexity",
+        help="Type of loss to use during training."
+    )
+    parser.add_argument(
+        "--kl_temperature",
+        type=float,
+        default=2.0,
+        help="Temperature value for KL divergence."
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=24,
+        help="Batch size for training."
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=2e-5,
+        help="Learning rate for the optimizer."
+    )
+    parser.add_argument(
+        "--max_length",
+        type=int,
+        default=4096,
+        help="Maximum sequence length for the tokenizer."
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="llama_tuned_head_output",
+        help="Directory where the trained model and optimizer state will be saved."
+    )
+
+    args = parser.parse_args()
+
+    # Pass the parsed arguments to your train function.
+    train(
+        model_path=args.model_path,
+        target_layer=args.target_layer,
+        loss_type=args.loss_type,
+        kl_temperature=args.kl_temperature,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        max_length=args.max_length,
+        output_dir=args.output_dir
+    )
