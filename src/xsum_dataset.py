@@ -63,7 +63,8 @@ class XSUMDataset(Dataset):
         # Make sure labels are shifted.
         return     {
             "input_ids": input_ids,
-            "labels": labels
+            "labels": labels,
+            # "attention_mask": attention_mask
         }
     
     # def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:

@@ -5,16 +5,18 @@ from transformers.modeling_outputs import MaskedLMOutput
 from typing import List, Tuple
 
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, num_transformer_layers: int, use_flash_attn: bool = False):
+    def __init__(self, model_path: str, num_transformer_layers: int, lm_head_random_init: bool = True, use_flash_attn: bool = False):
         super().__init__()
         # self.model = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
         if use_flash_attn:
             self.model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
         else:
             self.model = LlamaForCausalLM.from_pretrained(model_path)
+
         self.model.model.layers = self.model.model.layers[:num_transformer_layers]
-        # self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False, dtype=torch.bfloat16)
-        self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False)
+
+        if lm_head_random_init:
+            self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False)
 
         # Freeze all parameters except the new LM head
         for param in self.model.parameters():

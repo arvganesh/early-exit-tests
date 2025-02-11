@@ -19,7 +19,6 @@ class SlimPJDataset(Dataset):
         encodings = self.tokenizer(
             input_text.strip(),
             max_length=self.max_length,
-            padding="max_length", 
             truncation=True,
             return_tensors="pt" # Pytorch tensors
         )
@@ -28,7 +27,7 @@ class SlimPJDataset(Dataset):
         attention_mask = encodings["attention_mask"].squeeze()
 
         return {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": input_ids.clone()
+            "input_ids": input_ids[:-1],
+            "attention_mask": attention_mask[:-1],
+            "labels": input_ids.clone()[1:]
         }
