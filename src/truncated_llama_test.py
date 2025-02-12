@@ -85,5 +85,3 @@ def test_collate():
     # Assert that padding tokens are correct.
     assert (collated_batch["labels"][0, :] == torch.Tensor([284, 12, 53, 88, -100])).all()
     assert (collated_batch["labels"][1, :] == torch.Tensor([123, -100, -100, -100, -100])).all()
-
-    print(f"Passed {test_name}")
