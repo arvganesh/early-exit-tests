@@ -99,11 +99,11 @@ tokenizer.pad_token = tokenizer.eos_token
 # Setup for mixed precision training.
 torch.set_float32_matmul_precision("high")
 model = TruncatedLlama(args.model_path, 
-                       num_transformer_layers=args.target_layer,
+                       early_exit_idx=args.target_layer,
                        lm_head_random_init=args.lm_head_random_init, 
                        use_flash_attn=False)
 model.train()
-model = torch.compile(model) if args.device == "cuda" else model
+# model = torch.compile(model) if args.device == "cuda" else model
 model.to(args.device)
 
 ## Training Loop
@@ -123,7 +123,7 @@ model.to(args.device)
 # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 # val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=True)
 
-train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train")
+train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train", num_proc=8)
 tokenized_dataset = train_dataset.map(lambda example: 
                                     tokenizer(
                                         text=example["text"],
@@ -131,15 +131,13 @@ tokenized_dataset = train_dataset.map(lambda example:
                                     ),
                                     batched=False)
 tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-train_loader = DataLoader(tokenized_dataset, batch_size=4, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
-
+train_loader = DataLoader(tokenized_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
 
 max_lr = args.learning_rate
 min_lr = max_lr * 0.1
-max_steps = len(train_dataset) // args.batch_size
+max_steps = len(train_dataset)
 warmup_steps = max_steps * 0.05
 grad_accumulate_steps = 1
-# val_steps = len(val_loader) // args.batch_size
 lr_decay = False
 weight_decay = 0.01
 
@@ -184,12 +182,7 @@ optimizer = torch.optim.AdamW(model.parameters(),
 # Training stats.
 print(f"Max Steps: {max_steps}")
 print(f"Warmup Steps: {warmup_steps}")
-print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size * 4096}")
-
-# The one batch to overfit on
-next_batch = next(iter(train_loader))
-input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
-input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
+print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size}")
 
 for step in range(max_steps):
     # Run model on validation data every 50 steps.
@@ -241,8 +234,10 @@ for step in range(max_steps):
 
     # Get data tensors, move to device.
     loss_accum = 0.0
-    # start_time = time.time()
     for mini_step in range(grad_accumulate_steps):
+        next_batch = next(iter(train_loader))
+        input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
+        input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
 

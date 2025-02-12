@@ -1,44 +1,68 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoTokenizer
 from transformers.modeling_outputs import MaskedLMOutput
 from typing import List, Tuple
 
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, num_transformer_layers: int, lm_head_random_init: bool = True, use_flash_attn: bool = False):
+    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False, loss_type: str = "cross_entropy"):
         super().__init__()
-        # self.model = LlamaForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
         if use_flash_attn:
-            self.model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
+            model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
         else:
-            self.model = LlamaForCausalLM.from_pretrained(model_path)
+            model = LlamaForCausalLM.from_pretrained(model_path)
 
-        self.model.model.layers = self.model.model.layers[:num_transformer_layers]
+        print(model)
 
-        if lm_head_random_init:
-            self.model.lm_head = nn.Linear(self.model.lm_head.in_features, self.model.lm_head.out_features, bias=False)
-
-        # Freeze all parameters except the new LM head
-        for param in self.model.parameters():
+        # Freeze all parameters
+        for param in model.parameters():
             param.requires_grad = False
+        
+        # Read in arguments.
+        self.loss_type = loss_type
+        self.early_exit_idx = early_exit_idx + 1
 
-        for param in self.model.lm_head.parameters():
+        # Break up model
+        self.transformer_layers = model.model
+        self.og_lm_head = model.lm_head
+
+        # Optionally, randomly initialize the early-exiting LM head.
+        self.new_lm_head = nn.Linear(self.og_lm_head.in_features, self.og_lm_head.out_features, bias=False)
+        if not lm_head_random_init:
+            self.new_lm_head.load_state_dict(self.og_lm_head.state_dict())
+
+        for param in self.new_lm_head.parameters():
             param.requires_grad = True
 
         # Print the number of parameters in the model
-        print(f"Number of trainable parameters in the model: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}")
-        print(f"Number of parameters in the model: {sum(p.numel() for p in self.model.parameters())}")
-
+        num_trainable = sum(p.numel() for p in self.new_lm_head.parameters() if p.requires_grad)
+        total = num_trainable + sum(p.numel() for p in self.transformer_layers.parameters())
+        print(f"Number of trainable parameters in the model: {num_trainable}")
+        print(f"Number of parameters in the model: {total}")
 
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None):
-        # Get logits from model
-        outputs = self.model(input_ids, attention_mask=attention_mask)
-        logits = outputs.logits # shape: (batch_size, seq_len, vocab_size)
+        # Get activations from model's transformers layers.
+        # RMSNorm and RotaryEmbeddings are already applied with this call.
+        outputs = self.transformer_layers(input_ids, attention_mask=attention_mask, output_hidden_states=True)
 
-        # Get loss
+        # Save activations from intermediate and last layer.
+        # hidden_states[0] = embeddings, so use 1-based indexing.
+        early_exit_activations = outputs.hidden_states[self.early_exit_idx]
+        final_layer_activations = outputs.hidden_states[-1]
+
+        logits = self.new_lm_head(early_exit_activations)
         loss = None
-        if labels is not None:
-            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+        if self.loss_type == "cross_entropy":
+            # Compute normal cross entropy against the labels.
+            if labels is not None:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+        elif self.loss_type == "kl_divergence":
+            # Get logits of OG LM.
+            truth_logits = self.og_lm_head(final_layer_activations)
+            if labels is not None:
+                kl_loss = nn.KLDivLoss(log_target=True)
+                loss = kl_loss(logits, truth_logits)
 
         return MaskedLMOutput(
                 loss=loss,
@@ -79,156 +103,156 @@ class TruncatedLlama(nn.Module):
                 break
         return input_ids
 
-import lm_eval
-from lm_eval.api.instance import Instance
-import torch.nn.functional as F
+# import lm_eval
+# from lm_eval.api.instance import Instance
+# import torch.nn.functional as F
 
-class TruncatedLlamaWrapper(lm_eval.api.model.LM):
-    def __init__(self, model, tokenizer):
-        super().__init__()
-        self.model = model
-        self.tokenizer = tokenizer
-        self.tokenizer.pad_token = tokenizer.eos_token
-        self.device = next(model.parameters()).device
+# class TruncatedLlamaWrapper(lm_eval.api.model.LM):
+#     def __init__(self, model, tokenizer):
+#         super().__init__()
+#         self.model = model
+#         self.tokenizer = tokenizer
+#         self.tokenizer.pad_token = tokenizer.eos_token
+#         self.device = next(model.parameters()).device
         
-    @property
-    def eot_token_id(self):
-        # Return the EOT token ID for your model
-        return self.tokenizer.eos_token_id
+#     @property
+#     def eot_token_id(self):
+#         # Return the EOT token ID for your model
+#         return self.tokenizer.eos_token_id
         
-    @property
-    def max_length(self):
-        # Return the maximum sequence length
-        return 4096  # Adjust based on your model's configuration
+#     @property
+#     def max_length(self):
+#         # Return the maximum sequence length
+#         return 4096  # Adjust based on your model's configuration
         
-    @property
-    def max_gen_toks(self):
-        # Return the maximum number of tokens to generate
-        return 256  # Adjust as needed
+#     @property
+#     def max_gen_toks(self):
+#         # Return the maximum number of tokens to generate
+#         return 256  # Adjust as needed
         
-    def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
-        results = []
-        for request in requests:
-            # Tokenize context and continuation
-            context, continuation = request.args()
-            context_tokens = self.tokenizer.encode(context, add_special_tokens=False)
-            continuation_tokens = self.tokenizer.encode(continuation, add_special_tokens=False)
+#     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
+#         results = []
+#         for request in requests:
+#             # Tokenize context and continuation
+#             context, continuation = request.args()
+#             context_tokens = self.tokenizer.encode(context, add_special_tokens=False)
+#             continuation_tokens = self.tokenizer.encode(continuation, add_special_tokens=False)
             
-            # Combine context and continuation
-            input_ids = torch.tensor([context_tokens + continuation_tokens], device=self.device)
+#             # Combine context and continuation
+#             input_ids = torch.tensor([context_tokens + continuation_tokens], device=self.device)
             
-            # Create labels (-100 for context, actual tokens for continuation)
-            labels = torch.tensor(
-                [[-100] * len(context_tokens) + continuation_tokens], 
-                device=self.device
-            )
+#             # Create labels (-100 for context, actual tokens for continuation)
+#             labels = torch.tensor(
+#                 [[-100] * len(context_tokens) + continuation_tokens], 
+#                 device=self.device
+#             )
         
-            with torch.no_grad():
-                outputs = self.model(input_ids, labels=labels)
-                logits = outputs.logits
+#             with torch.no_grad():
+#                 outputs = self.model(input_ids, labels=labels)
+#                 logits = outputs.logits
                 
-                # Get logits for continuation tokens only
-                cont_logits = logits[0, len(context_tokens)-1:-1] # removes last token legits
-                cont_tokens = input_ids[0, len(context_tokens):]
+#                 # Get logits for continuation tokens only
+#                 cont_logits = logits[0, len(context_tokens)-1:-1] # removes last token legits
+#                 cont_tokens = input_ids[0, len(context_tokens):]
                 
-                # Calculate log likelihood
-                log_probs = F.log_softmax(cont_logits, dim=-1)
-                token_log_probs = log_probs[range(len(cont_tokens)), cont_tokens]
-                total_log_prob = token_log_probs.sum().item()
+#                 # Calculate log likelihood
+#                 log_probs = F.log_softmax(cont_logits, dim=-1)
+#                 token_log_probs = log_probs[range(len(cont_tokens)), cont_tokens]
+#                 total_log_prob = token_log_probs.sum().item()
                 
-                # Check if the continuation is greedy
-                is_greedy = True
-                for logits_i, token_i in zip(cont_logits, cont_tokens):
-                    if torch.argmax(logits_i).item() != token_i.item():
-                        is_greedy = False
-                        break
+#                 # Check if the continuation is greedy
+#                 is_greedy = True
+#                 for logits_i, token_i in zip(cont_logits, cont_tokens):
+#                     if torch.argmax(logits_i).item() != token_i.item():
+#                         is_greedy = False
+#                         break
                 
-            results.append((total_log_prob, is_greedy))
+#             results.append((total_log_prob, is_greedy))
         
-        return results
+#         return results
     
-    def loglikelihood_rolling(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
-        results = []
-        for request in requests:
-            # Tokenize the full sequence
-            text = request.args()
-            tokens = self.tokenizer.encode(text, add_special_tokens=True)
-            tokens = torch.tensor([tokens], device=self.device)
+#     def loglikelihood_rolling(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
+#         results = []
+#         for request in requests:
+#             # Tokenize the full sequence
+#             text = request.args()
+#             tokens = self.tokenizer.encode(text, add_special_tokens=True)
+#             tokens = torch.tensor([tokens], device=self.device)
 
-            # how this all works (illustrated on a causal decoder-only setup):
-                #          CTX      CONT
-                # inp    0 1 2 3|4 5 6 7 8 9   <- last token is deleted by inp[:, :-1]
-                # model  \               \
-                # logits   1 2 3|4 5 6 7 8 9   <- the ctx half gets tossed out by the
-                # cont_toks      4 5 6 7 8 9      [:, -len(continuation_enc):, :self.vocab_size] slice # noqa: E501
+#             # how this all works (illustrated on a causal decoder-only setup):
+#                 #          CTX      CONT
+#                 # inp    0 1 2 3|4 5 6 7 8 9   <- last token is deleted by inp[:, :-1]
+#                 # model  \               \
+#                 # logits   1 2 3|4 5 6 7 8 9   <- the ctx half gets tossed out by the
+#                 # cont_toks      4 5 6 7 8 9      [:, -len(continuation_enc):, :self.vocab_size] slice # noqa: E501
             
-            # Calculate log likelihood token by token
-            total_log_prob = 0.0
-            with torch.no_grad():
-                outputs = self.model(tokens)
-                logits = outputs.logits[:, :-1] # Remove last logit
-                tokens = tokens[1:] # Remove first token (b/c we don't care about the probability of the start token being generated)
-                log_probs = F.log_softmax(logits, dim=-1) # 1, seq length, vocab size (normalized)
-                for i in range(len(tokens)):
-                    total_log_prob += log_probs[0, tokens[0, i]].item() # 
+#             # Calculate log likelihood token by token
+#             total_log_prob = 0.0
+#             with torch.no_grad():
+#                 outputs = self.model(tokens)
+#                 logits = outputs.logits[:, :-1] # Remove last logit
+#                 tokens = tokens[1:] # Remove first token (b/c we don't care about the probability of the start token being generated)
+#                 log_probs = F.log_softmax(logits, dim=-1) # 1, seq length, vocab size (normalized)
+#                 for i in range(len(tokens)):
+#                     total_log_prob += log_probs[0, tokens[0, i]].item() # 
 
-            # Check if the continuation is greedy
-            is_greedy = True
-            log_probs = log_probs[0]
-            for logits_i, token_i in zip(log_probs, tokens):
-                if torch.argmax(logits_i).item() != token_i.item():
-                    is_greedy = False
-                    break
+#             # Check if the continuation is greedy
+#             is_greedy = True
+#             log_probs = log_probs[0]
+#             for logits_i, token_i in zip(log_probs, tokens):
+#                 if torch.argmax(logits_i).item() != token_i.item():
+#                     is_greedy = False
+#                     break
         
-            results.append((total_log_prob, is_greedy))
+#             results.append((total_log_prob, is_greedy))
         
-        return results
+#         return results
     
-    def generate_until(self, requests: List[Instance]) -> List[str]:
-        results = []
-        for request in requests:
-            # Tokenize context
-            input_str, kwargs = request.args()
-            input_ids = self.tokenizer.encode(input_str, return_tensors="pt").to(self.device)
+#     def generate_until(self, requests: List[Instance]) -> List[str]:
+#         results = []
+#         for request in requests:
+#             # Tokenize context
+#             input_str, kwargs = request.args()
+#             input_ids = self.tokenizer.encode(input_str, return_tensors="pt").to(self.device)
             
-            generated_tokens = []
-            max_new_tokens = self.max_gen_toks
+#             generated_tokens = []
+#             max_new_tokens = self.max_gen_toks
             
-            with torch.no_grad():
-                for _ in range(max_new_tokens):
-                    outputs = self.model(input_ids)
-                    next_token_logits = outputs.logits[:, -1, :]
-                    next_token = torch.argmax(next_token_logits, dim=-1)
+#             with torch.no_grad():
+#                 for _ in range(max_new_tokens):
+#                     outputs = self.model(input_ids)
+#                     next_token_logits = outputs.logits[:, -1, :]
+#                     next_token = torch.argmax(next_token_logits, dim=-1)
                     
-                    # Append the new token
-                    input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
-                    generated_tokens.append(next_token.item())
+#                     # Append the new token
+#                     input_ids = torch.cat([input_ids, next_token.unsqueeze(0)], dim=1)
+#                     generated_tokens.append(next_token.item())
                     
-                    # Check if we've generated any of the until sequences
-                    generated_text = self.tokenizer.decode(generated_tokens)
-                    if any(stop_seq in generated_text for stop_seq in until):
-                        break
+#                     # Check if we've generated any of the until sequences
+#                     generated_text = self.tokenizer.decode(generated_tokens)
+#                     if any(stop_seq in generated_text for stop_seq in until):
+#                         break
                     
-                    # Check if we've hit the EOT token
-                    if next_token.item() == self.eot_token_id:
-                        break
+#                     # Check if we've hit the EOT token
+#                     if next_token.item() == self.eot_token_id:
+#                         break
             
-            # Decode the generated tokens
-            generated_text = self.tokenizer.decode(generated_tokens)
+#             # Decode the generated tokens
+#             generated_text = self.tokenizer.decode(generated_tokens)
             
-            # Truncate at the first occurrence of any until sequence
-            for stop_seq in until:
-                if stop_seq in generated_text:
-                    generated_text = generated_text[:generated_text.index(stop_seq)]
+#             # Truncate at the first occurrence of any until sequence
+#             for stop_seq in until:
+#                 if stop_seq in generated_text:
+#                     generated_text = generated_text[:generated_text.index(stop_seq)]
             
-            results.append(generated_text)
+#             results.append(generated_text)
         
-        return results
+#         return results
     
 
-if __name__ == "__main__":
-    model_path = "meta-llama/llama-2-7B-hf"
-    mdl = TruncatedLlamaWrapper(TruncatedLlama(model_path), AutoTokenizer.from_pretrained(model_path))
-    inst = Instance()
-    inst.arguments = "Hi! What's the probability of this?"
-    print(mdl.loglikelihood([inst]))
+# if __name__ == "__main__":
+#     model_path = "meta-llama/llama-2-7B-hf"
+#     mdl = TruncatedLlamaWrapper(TruncatedLlama(model_path), AutoTokenizer.from_pretrained(model_path))
+#     inst = Instance()
+#     inst.arguments = "Hi! What's the probability of this?"
+#     print(mdl.loglikelihood([inst]))
