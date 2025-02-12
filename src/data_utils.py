@@ -39,8 +39,8 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True):
         labels = input_ids.clone()[:, 1:] # Remove first token from labels.
         labels = torch.cat((labels, pad_tokens), dim=1) # Add another padding token
         labels = labels.masked_fill(attention_mask == 0, -100)
-
-    assert labels.shape == input_ids.shape
+        assert labels.shape == input_ids.shape
+        
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,

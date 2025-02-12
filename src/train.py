@@ -111,7 +111,7 @@ model.to(args.device)
 # train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True, collate_fn=data_collator)
 # val_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=True)
 
-train, test, val = get_sharegpt_dataloaders(args.batch_Size, tokenizer, generate_labels = args.loss_type == "cross_entropy")
+train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = args.loss_type == "cross_entropy")
 
 # Uncomment to use SlimPJ
 # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -180,17 +180,17 @@ print(f"Max Steps: {max_steps}")
 print(f"Warmup Steps: {warmup_steps}")
 print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size}")
 
-next_batch = next(iter(train))
-input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
-input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
-
-if args.loss_type == "cross_entropy":
-    labels = labels.to(args.device)
-
 for step in range(max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
     for mini_step in range(grad_accumulate_steps):
+        next_batch = next(iter(train))
+        input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
+        input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+        labels = None
+        if args.loss_type == "cross_entropy":
+            labels = labels.to(args.device)
+
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
 
@@ -211,6 +211,30 @@ for step in range(max_steps):
     print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {args.learning_rate}")
     if args.wandb:
         wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": args.learning_rate})
+
+# evaluate average perplexity over test dataset
+# Get data tensors, move to device.
+with torch.no_grad():
+    early_exit_perplexity = 0
+    expected_perplexity = 0
+    total_tokens = 0
+    for batch in val:
+        input_ids, attention_mask, labels = batch["input_ids"], batch["attention_mask"], batch["labels"]
+        input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
+        with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type="cross_entropy", keep_og_logits=True)
+
+        loss, logits = outputs["loss"], outputs["logits"]
+        batch_tokens = attention_mask.sum().item()
+        early_exit_perplexity += loss.item() * batch_tokens
+        
+        og_logits = outputs["og_lm_logits"]
+        og_loss = F.cross_entropy(og_logits.view(-1, og_logits.size(-1)), labels.view(-1)).item()
+        expected_perplexity += og_loss * batch_tokens
+        total_tokens += batch_tokens
+
+
+print(f"exp: {expected_perplexity / total_tokens}, actual: {early_exit_perplexity / total_tokens}")
 
 if args.wandb:
     wandb.finish()

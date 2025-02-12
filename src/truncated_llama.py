@@ -59,6 +59,8 @@ class TruncatedLlama(nn.Module):
             og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
             kl_loss = nn.KLDivLoss(log_target=True, reduction="batchmean")
             loss = kl_loss(logits, og_lm_logits)
+            if loss < 0:
+                import pdb; pdb.set_trace()
         elif keep_og_logits:
             og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
 
