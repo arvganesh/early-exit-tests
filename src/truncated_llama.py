@@ -43,7 +43,7 @@ class TruncatedLlama(nn.Module):
         print(f"Number of trainable parameters in the model: {num_trainable}")
         print(f"Number of parameters in the model: {total}")
 
-    def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None):
+    def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None, keep_og_logits=False):
         # Apply RMSNorm to early exit activations (embeddings already applied).
         final_layer_activations = self.headless_model(input_ids, attention_mask=attention_mask)
         assert self.early_exit_activations != None
@@ -51,20 +51,22 @@ class TruncatedLlama(nn.Module):
         logits = self.new_lm_head(self.early_exit_activations)
 
         loss = None
+        og_lm_logits = None
         if loss_type == "cross_entropy":
-            # Compute normal cross entropy against the labels.
-            if labels is not None:
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+            assert labels is not None
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         elif loss_type == "kl_divergence":
-            # Get logits of OG LM.
-            truth_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
+            og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
             kl_loss = nn.KLDivLoss(log_target=True, reduction="batchmean")
-            loss = kl_loss(logits, truth_logits)
+            loss = kl_loss(logits, og_lm_logits)
+        elif keep_og_logits:
+            og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
 
-        return MaskedLMOutput(
-                loss=loss,
-                logits=logits
-            )
+        return {
+            "loss": loss,
+            "logits": logits,
+            "og_lm_logits": og_lm_logits if keep_og_logits else None,
+        }
     
     def configure_optimizers(self, weight_decay, learning_rate, device_type):
         # start with all of the candidate parameters (that require grad)

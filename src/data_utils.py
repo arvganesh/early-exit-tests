@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-def custom_collate_fn(batch, tokenizer):
+def custom_collate_fn(batch, tokenizer, generate_labels=True):
     """
     Expect the batch to look like this:
     [
@@ -33,9 +33,12 @@ def custom_collate_fn(batch, tokenizer):
     attention_mask = torch.cat((attention_mask, pad_mask), dim=1)
 
     pad_tokens = torch.full((len(batch), 1), tokenizer.pad_token_id)
-    labels = input_ids.clone()[:, 1:] # Remove first token from labels.
-    labels = torch.cat((labels, pad_tokens), dim=1) # Add another padding token
-    labels = labels.masked_fill(attention_mask == 0, -100)
+
+    labels = None
+    if generate_labels:
+        labels = input_ids.clone()[:, 1:] # Remove first token from labels.
+        labels = torch.cat((labels, pad_tokens), dim=1) # Add another padding token
+        labels = labels.masked_fill(attention_mask == 0, -100)
 
     assert labels.shape == input_ids.shape
     return {

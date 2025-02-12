@@ -15,11 +15,10 @@ def tokenize_sharegpt_examples(example, tokenizer, max_length):
             break
     return tokenizer(text=conversation, padding=False)
 
-def create_sharegpt_train_test_val(train_size=0.8, test_size=0.1):
+def create_sharegpt_train_test_val(train_size=0.8, test_size=0.1, seed=0):
     assert train_size != 0
     assert test_size != 0
 
-    seed = 42
     dataset = load_dataset("liyucheng/ShareGPT90K", split="train", num_proc=4)
     split_datasets = dataset.train_test_split(train_size=train_size, seed=seed)
     train, non_train = split_datasets["train"], split_datasets["test"]
@@ -28,13 +27,14 @@ def create_sharegpt_train_test_val(train_size=0.8, test_size=0.1):
     test, val = train_val_datasets["train"], train_val_datasets["test"]
     return train, test, val
 
-def get_sharegpt_dataloaders(batch_size, tokenizer):
-    train, test, val = create_sharegpt_train_test_val()
+def get_sharegpt_dataloaders(batch_size, tokenizer, train_size=0.8, test_size=0.1, val_size=0.1, seed=0, generate_labels=True):
+    assert train_size + test_size + val_size == 1.0
+    train, test, val = create_sharegpt_train_test_val(train_size=train_size, test_size=test_size, seed=seed)
     train = train.map(tokenize_sharegpt_examples, batched=False).set_format(type="torch", columns=["input_ids", "attention_mask"])
     test = test.map(tokenize_sharegpt_examples, batched=False).set_format(type="torch", columns=["input_ids", "attention_mask"])
     val = val.map(tokenize_sharegpt_examples, batched=False).set_format(type="torch", columns=["input_ids", "attention_mask"])
 
-    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
-    test_loader = DataLoader(test, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
-    val_loader = DataLoader(val, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
+    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
+    test_loader = DataLoader(test, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
+    val_loader = DataLoader(val, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
     return train_loader, test_loader, val_loader

@@ -30,8 +30,8 @@ def test_same_output_with_last_layer_exit():
     truth_outputs = truth_model(inputs["input_ids"])
     test_outputs = test_model(fake_inputs["input_ids"], loss_type="kl_divergence")
 
-    truth_logits, actual_logits = truth_outputs.logits, test_outputs.logits
-    test_loss = test_outputs.loss
+    truth_logits, actual_logits = truth_outputs["logits"], test_outputs["logits"]
+    test_loss = test_outputs["loss"]
 
     assert truth_logits.shape == actual_logits.shape
     assert (truth_logits == actual_logits).all()
@@ -56,7 +56,7 @@ def test_hidden_states_match_on_early_exit():
     truth_hidden_states = truth_outputs.hidden_states[early_exit_layer + 1]
 
     expected_logits = truth_model.lm_head(truth_model.model.norm(truth_hidden_states))
-    actual_logits = test_model(fake_inputs["input_ids"]).logits
+    actual_logits = test_model(fake_inputs["input_ids"])["logits"]
 
     assert expected_logits.shape == actual_logits.shape
     assert (expected_logits == actual_logits).all()

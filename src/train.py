@@ -111,7 +111,7 @@ model.to(args.device)
 # train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True, collate_fn=data_collator)
 # val_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=True)
 
-train, test, val = get_sharegpt_dataloaders(args.batch_Size, tokenizer)
+train, test, val = get_sharegpt_dataloaders(args.batch_Size, tokenizer, generate_labels = args.loss_type == "cross_entropy")
 
 # Uncomment to use SlimPJ
 # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -182,61 +182,17 @@ print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size}")
 
 next_batch = next(iter(train))
 input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
-input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
+input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+
+if args.loss_type == "cross_entropy":
+    labels = labels.to(args.device)
 
 for step in range(max_steps):
-    # Run model on validation data every 50 steps.
-    # if step % 500 == 0 or step == 0:
-    #     model.eval()
-    #     val_accum = 0.0
-    #     with torch.no_grad():
-    #         for batch_idx, batch in enumerate(val_loader):
-    #             if batch_idx >= 10:
-    #                 break
-    #             input_ids, labels = batch["input_ids"], batch["labels"]
-    #             input_ids, labels = input_ids.to(args.device), labels.to(args.device)
-    #             with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-    #                 outputs = model(input_ids, labels=labels)
-    #             val_loss = outputs.loss
-    #             val_loss /= grad_accumulate_steps
-    #             val_accum += val_loss.detach()
-    #     model.train()
-    #     print(f"Validation Loss: {val_accum}")
-    #     if args.wandb:
-    #         wandb.log({"val/loss": val_accum})
-
-    # save optimizer state
-    # if step % 1000 == 0 or step == max_steps - 1:
-    #     optimizer_state = optimizer.state_dict()
-    #     trained_params = model.model.lm_head.state_dict()
-    #     torch.save({
-    #         "optimizer_state": optimizer_state,
-    #         "trained_params": trained_params,
-    #         "step": step,
-    #         # "val_loss": val_accum
-    #     }, f"./models/xsum1/llama-trunc-{step}step")
-
-    # Generate from model every 100 steps.
-    # .generate() uses autocast.
-    # if step % 100 == 0 or step == max_steps - 1:
-    #     prompt = "Hi! I'm a language model."
-    #     input_ids = tokenizer.encode(prompt, return_tensors="pt")
-    #     input_ids = input_ids.to(args.device)
-    #     model.eval()
-    #     with torch.no_grad():
-    #         for i in range(10):
-    #             outputs = model.generate(input_ids, max_length=20, eos_token_id=tokenizer.eos_token_id)
-    #             s = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-    #             print(s)
-    #             if args.wandb:
-    #                 wandb.log({"gen/output": s})
-    #     model.train()
-
     # Get data tensors, move to device.
     loss_accum = 0.0
     for mini_step in range(grad_accumulate_steps):
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
 
         loss, logits = outputs["loss"], outputs["logits"]
         loss = loss / grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
@@ -252,10 +208,56 @@ for step in range(max_steps):
     optimizer.zero_grad()
 
     # Log training stats.
-    # print(f"Training Time: {end_time - start_time}, Tokens per second: {grad_accumulate_steps * batch_size * 4096 / (end_time - start_time)}")
     print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {args.learning_rate}")
     if args.wandb:
         wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": args.learning_rate})
 
 if args.wandb:
     wandb.finish()
+
+# Run model on validation data every 50 steps.
+# if step % 500 == 0 or step == 0:
+#     model.eval()
+#     val_accum = 0.0
+#     with torch.no_grad():
+#         for batch_idx, batch in enumerate(val_loader):
+#             if batch_idx >= 10:
+#                 break
+#             input_ids, labels = batch["input_ids"], batch["labels"]
+#             input_ids, labels = input_ids.to(args.device), labels.to(args.device)
+#             with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
+#                 outputs = model(input_ids, labels=labels)
+#             val_loss = outputs.loss
+#             val_loss /= grad_accumulate_steps
+#             val_accum += val_loss.detach()
+#     model.train()
+#     print(f"Validation Loss: {val_accum}")
+#     if args.wandb:
+#         wandb.log({"val/loss": val_accum})
+
+# save optimizer state
+# if step % 1000 == 0 or step == max_steps - 1:
+#     optimizer_state = optimizer.state_dict()
+#     trained_params = model.model.lm_head.state_dict()
+#     torch.save({
+#         "optimizer_state": optimizer_state,
+#         "trained_params": trained_params,
+#         "step": step,
+#         # "val_loss": val_accum
+#     }, f"./models/xsum1/llama-trunc-{step}step")
+
+# Generate from model every 100 steps.
+# .generate() uses autocast.
+# if step % 100 == 0 or step == max_steps - 1:
+#     prompt = "Hi! I'm a language model."
+#     input_ids = tokenizer.encode(prompt, return_tensors="pt")
+#     input_ids = input_ids.to(args.device)
+#     model.eval()
+#     with torch.no_grad():
+#         for i in range(10):
+#             outputs = model.generate(input_ids, max_length=20, eos_token_id=tokenizer.eos_token_id)
+#             s = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+#             print(s)
+#             if args.wandb:
+#                 wandb.log({"gen/output": s})
+#     model.train()
