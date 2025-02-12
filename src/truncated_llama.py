@@ -6,7 +6,7 @@ from transformers.modeling_outputs import MaskedLMOutput
 from typing import List, Tuple
 
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False, loss_type: str = "cross_entropy"):
+    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False):
         super().__init__()
         if use_flash_attn:
             model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
@@ -18,14 +18,16 @@ class TruncatedLlama(nn.Module):
         # Freeze all parameters
         for param in model.parameters():
             param.requires_grad = False
-        
-        # Read in arguments.
-        self.loss_type = loss_type
-        self.early_exit_idx = early_exit_idx + 1
 
         # Break up model
-        self.transformer_layers = model.model
+        self.headless_model = model.model
         self.og_lm_head = model.lm_head
+
+        # Register hook to save early exit activations
+        self.early_exit_activations = None
+        def save_activations(module, input, output):
+            self.early_exit_activations = output[0]
+        self.headless_model.layers[early_exit_idx].register_forward_hook(save_activations)
 
         # Optionally, randomly initialize the early-exiting LM head.
         self.new_lm_head = nn.Linear(self.og_lm_head.in_features, self.og_lm_head.out_features, bias=False)
@@ -37,38 +39,32 @@ class TruncatedLlama(nn.Module):
 
         # Print the number of parameters in the model
         num_trainable = sum(p.numel() for p in self.new_lm_head.parameters() if p.requires_grad)
-        total = num_trainable + sum(p.numel() for p in self.transformer_layers.parameters())
+        total = num_trainable + sum(p.numel() for p in self.headless_model.parameters())
         print(f"Number of trainable parameters in the model: {num_trainable}")
         print(f"Number of parameters in the model: {total}")
 
-    def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None):
-        # Get activations from model's transformers layers.
-        # RMSNorm and RotaryEmbeddings are already applied with this call.
-        outputs = self.transformer_layers(input_ids, attention_mask=attention_mask, output_hidden_states=True)
+    def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None):
+        # Apply RMSNorm to early exit activations (embeddings already applied).
+        final_layer_activations = self.headless_model(input_ids, attention_mask=attention_mask)
+        assert self.early_exit_activations != None
+        self.early_exit_activations = self.headless_model.norm(self.early_exit_activations)
+        logits = self.new_lm_head(self.early_exit_activations)
 
-        # Save activations from intermediate and last layer.
-        # hidden_states[0] = embeddings, so use 1-based indexing.
-        early_exit_activations = outputs.hidden_states[self.early_exit_idx]
-        final_layer_activations = outputs.hidden_states[-1]
-
-        logits = self.new_lm_head(early_exit_activations)
         loss = None
-        if self.loss_type == "cross_entropy":
+        if loss_type == "cross_entropy":
             # Compute normal cross entropy against the labels.
             if labels is not None:
                 loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
-        elif self.loss_type == "kl_divergence":
+        elif loss_type == "kl_divergence":
             # Get logits of OG LM.
-            truth_logits = self.og_lm_head(final_layer_activations)
-            if labels is not None:
-                kl_loss = nn.KLDivLoss(log_target=True)
-                loss = kl_loss(logits, truth_logits)
+            truth_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
+            kl_loss = nn.KLDivLoss(log_target=True, reduction="batchmean")
+            loss = kl_loss(logits, truth_logits)
 
         return MaskedLMOutput(
                 loss=loss,
                 logits=logits
             )
-    
     
     def configure_optimizers(self, weight_decay, learning_rate, device_type):
         # start with all of the candidate parameters (that require grad)

@@ -5,7 +5,7 @@ def custom_collate_fn(batch, tokenizer):
     """
     Expect the batch to look like this:
     [
-    {"input_ids": torch.Tensor, "attention_mask": torch.Tensor},
+    {"input_ids": [torch.Tensor], "attention_mask": torch.Tensor},
     ...
     {},
     ]

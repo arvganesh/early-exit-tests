@@ -9,15 +9,13 @@ import wandb
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Literal
 import logging
-from slim_pj_dataset import SlimPJDataset
-from truncated_llama import TruncatedLlama
-from data_utils import custom_collate_fn
-from xsum_dataset import XSUMDataset
 import pickle
 import math
-from share_gpt_dataloader import ShareGPTDataset
 import time
 import argparse
+
+from truncated_llama import TruncatedLlama
+from share_gpt_dataset import get_sharegpt_dataloaders
 
 parser = argparse.ArgumentParser(description="Train a truncated Llama model with a tuned head.")
 parser.add_argument(
@@ -105,7 +103,6 @@ model = TruncatedLlama(args.model_path,
 model.train()
 # model = torch.compile(model) if args.device == "cuda" else model
 model.to(args.device)
-
 ## Training Loop
 
 # Uncomment to use XSUM
@@ -114,8 +111,7 @@ model.to(args.device)
 # train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True, collate_fn=data_collator)
 # val_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=True)
 
-# Uncomment to use ShareGPT
-# train_dataset = ShareGPTDataset(tokenizer, max_length=max_length)
+train, test, val = get_sharegpt_dataloaders(args.batch_Size, tokenizer)
 
 # Uncomment to use SlimPJ
 # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -123,19 +119,19 @@ model.to(args.device)
 # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 # val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=True)
 
-train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train", num_proc=8)
-tokenized_dataset = train_dataset.map(lambda example: 
-                                    tokenizer(
-                                        text=example["text"],
-                                        padding=False
-                                    ),
-                                    batched=False)
-tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-train_loader = DataLoader(tokenized_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
+# train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train", num_proc=8)
+# tokenized_dataset = train_dataset.map(lambda example: 
+#                                     tokenizer(
+#                                         text=example["text"],
+#                                         padding=False
+#                                     ),
+#                                     batched=False)
+# tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
+# train_loader = DataLoader(tokenized_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
 
 max_lr = args.learning_rate
 min_lr = max_lr * 0.1
-max_steps = len(train_dataset)
+max_steps = 10000
 warmup_steps = max_steps * 0.05
 grad_accumulate_steps = 1
 lr_decay = False
@@ -183,6 +179,10 @@ optimizer = torch.optim.AdamW(model.parameters(),
 print(f"Max Steps: {max_steps}")
 print(f"Warmup Steps: {warmup_steps}")
 print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size}")
+
+next_batch = next(iter(train))
+input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
+input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
 
 for step in range(max_steps):
     # Run model on validation data every 50 steps.
@@ -235,9 +235,6 @@ for step in range(max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
     for mini_step in range(grad_accumulate_steps):
-        next_batch = next(iter(train_loader))
-        input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
-        input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
 
@@ -258,7 +255,7 @@ for step in range(max_steps):
     # print(f"Training Time: {end_time - start_time}, Tokens per second: {grad_accumulate_steps * batch_size * 4096 / (end_time - start_time)}")
     print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {args.learning_rate}")
     if args.wandb:
-        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": lr})
+        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": args.learning_rate})
 
 if args.wandb:
     wandb.finish()
