@@ -57,10 +57,9 @@ class TruncatedLlama(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         elif loss_type == "kl_divergence":
             og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
-            kl_loss = nn.KLDivLoss(log_target=True, reduction="batchmean")
-            loss = kl_loss(logits, og_lm_logits)
-            if loss < 0:
-                import pdb; pdb.set_trace()
+            kl_loss = nn.KLDivLoss(reduction="batchmean")
+            logits_log_prob = F.log_softmax(logits, dim=-1)
+            loss = kl_loss(logits_log_prob, og_lm_logits)
         elif keep_og_logits:
             og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
 
