@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import math
 
 def custom_collate_fn(batch, tokenizer, generate_labels=True):
     """
@@ -16,15 +17,16 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True):
     'input_ids': [[128000, 284, 86262, 88, 4298, 66416, 14767, 284, 720]], 'attention_mask': [[1, 1, 1, 1, 1, 1, 1, 1, 1]]
     """
 
-    # Pad to the max length item for the entire batch.
-    # For inputs, use the padding token for padding. For the attention mask, pad with 0s.
-    max_length = max([len(elem["input_ids"]) for elem in batch])
+    # Pad to the max length item for the entire batch, rounded up to nearest power of two.
+    batch_length = max([len(elem["input_ids"]) for elem in batch])
+    batch_length = 2 ** math.ceil(math.log(batch_length, 2))
+
     input_ids = torch.stack([F.pad(elem["input_ids"], 
-                            (0, max_length - len(elem["input_ids"])),
+                            (0, batch_length - len(elem["input_ids"])),
                             mode="constant",
                             value=tokenizer.pad_token_id) for elem in batch], dim=0)
     attention_mask = torch.stack([F.pad(elem["attention_mask"],
-                                 (0, max_length - len(elem["attention_mask"])),
+                                 (0, batch_length - len(elem["attention_mask"])),
                                  mode="constant",
                                  value=0) for elem in batch], dim=0)
 
