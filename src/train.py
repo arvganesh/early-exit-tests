@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
+from transformers import get_linear_schedule_with_warmup
 from datasets import load_dataset
 import wandb
 import numpy as np
@@ -13,6 +14,7 @@ import pickle
 import math
 import time
 import argparse
+from datetime import datetime
 
 from truncated_llama import TruncatedLlama
 from share_gpt_dataset import get_sharegpt_dataloaders
@@ -50,6 +52,18 @@ parser.add_argument(
     help="Batch size for training."
 )
 parser.add_argument(
+    "--grad_accumulate_steps",
+    type=int,
+    default=1,
+    help="Batch size for training."
+)
+parser.add_argument(
+    "--max_steps",
+    type=int,
+    default=24,
+    help="# of Training Steps."
+)
+parser.add_argument(
     "--learning_rate",
     type=float,
     default=2e-5,
@@ -84,7 +98,7 @@ parser.add_argument(
     help="Randomly initializes the LM head to train."
 )
 args = parser.parse_args()
-
+print(args)
 
 # Set device to GPU if available
 logging.basicConfig(level=logging.INFO)
@@ -131,9 +145,9 @@ train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max
 
 max_lr = args.learning_rate
 min_lr = max_lr * 0.1
-max_steps = 10000
+max_steps = args.max_steps
 warmup_steps = max_steps * 0.05
-grad_accumulate_steps = 1
+grad_accumulate_steps = args.grad_accumulate_steps
 lr_decay = False
 weight_decay = 0.01
 
@@ -174,11 +188,16 @@ optimizer = torch.optim.AdamW(model.parameters(),
                               betas=(0.9, 0.95), 
                               eps=1e-8, 
                               fused=use_fused)
+scheduler = get_linear_schedule_with_warmup(optimizer,
+                                            num_warmup_steps=int(max_steps * 0.1),
+                                            num_training_steps=max_steps)
 
 # Training stats.
 print(f"Max Steps: {max_steps}")
 print(f"Warmup Steps: {warmup_steps}")
 print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size}")
+
+run_name = f"kl_div_model.{datetime.now()}"
 
 for step in range(max_steps):
     # Get data tensors, move to device.
@@ -190,7 +209,6 @@ for step in range(max_steps):
         labels = None
         if args.loss_type == "cross_entropy":
             labels = labels.to(args.device)
-
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
 
@@ -199,6 +217,9 @@ for step in range(max_steps):
         loss_accum += loss.detach()
         loss.backward()
 
+    if step % 500 == 0:
+        torch.save(model.new_lm_head.state_dict(), f"../../models/{run_name}_{step}_{loss_accum:.2f}.pt")
+
     # Clip gradients and step.
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     # lr = get_lr(step, lr_decay)
@@ -206,11 +227,14 @@ for step in range(max_steps):
     #     param_group['lr'] = lr
     optimizer.step()
     optimizer.zero_grad()
+    scheduler.step()
+
+    current_lr = optimizer.param_groups[0]['lr']
 
     # Log training stats.
-    print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {args.learning_rate}")
+    print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {current_lr}")
     if args.wandb:
-        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": args.learning_rate})
+        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": current_lr})
 
 # evaluate average perplexity over test dataset
 # Get data tensors, move to device.
