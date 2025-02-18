@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 import argparse
+import random
+import numpy
 from truncated_llama import TruncatedLlama
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from transformers import get_linear_schedule_with_warmup
@@ -62,6 +64,10 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+# torch.manual_seed(0)
+# numpy.random.seed(0)
+# random.seed(0)
+
 torch.set_float32_matmul_precision("high")
 model = TruncatedLlama(args.model_path, 
                        early_exit_idx=args.target_layer,
@@ -75,31 +81,30 @@ model.to(args.device)
 tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 tokenizer.pad_token = tokenizer.eos_token
 
-# train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = True)
+train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = True)
 
 # evaluate average perplexity over test dataset
 # Get data tensors, move to device.
-# with torch.no_grad():
-#     early_exit_perplexity = 0
-#     expected_perplexity = 0
-#     total_tokens = 0
-#     for idx, batch in enumerate(val):
-#         input_ids, attention_mask, labels = batch["input_ids"], batch["attention_mask"], batch["labels"]
-#         input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
-#         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-#             outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type="cross_entropy", keep_og_logits=True)
-
-#         loss, logits = outputs["loss"], outputs["logits"]
-#         batch_tokens = attention_mask.sum().item()
-#         early_exit_perplexity += loss.item() * batch_tokens
-        
-#         og_logits = outputs["og_lm_logits"]
-#         og_loss = F.cross_entropy(og_logits.view(-1, og_logits.size(-1)), labels.view(-1)).item()
-#         expected_perplexity += og_loss * batch_tokens
-#         total_tokens += batch_tokens
-#         if idx % 1000 == 0:
-#             print("almost there")
-# print(f"exp: {expected_perplexity / total_tokens}, actual: {early_exit_perplexity / total_tokens}")
+with torch.no_grad():
+    early_exit_perplexity = 0
+    expected_perplexity = 0
+    total_tokens = 0
+    print(f"Num validation examples: {len(val)}")
+    for idx, batch in enumerate(val):
+        input_ids, attention_mask, labels = batch["input_ids"], batch["attention_mask"], batch["labels"]
+        input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
+        with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type="cross_entropy", keep_og_logits=True)
+        loss, logits = outputs["loss"], outputs["logits"]
+        batch_tokens = attention_mask.sum().item()
+        early_exit_perplexity += loss.item() * batch_tokens
+        og_logits = outputs["og_lm_logits"]
+        og_loss = F.cross_entropy(og_logits.view(-1, og_logits.size(-1)), labels.view(-1)).item()
+        expected_perplexity += og_loss * batch_tokens
+        total_tokens += batch_tokens
+        if idx % 1000 == 0:
+            print("almost there")
+print(f"exp: {expected_perplexity / total_tokens}, actual: {early_exit_perplexity / total_tokens}")
 
 prompt = "Hello! I'm a language model."
 inputs = tokenizer(prompt, return_tensors="pt")

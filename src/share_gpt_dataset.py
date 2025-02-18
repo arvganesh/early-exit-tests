@@ -5,6 +5,7 @@ ShareGPT specific helper functions.
 from data_utils import custom_collate_fn
 from datasets import load_dataset
 from torch.utils.data import DataLoader
+from langdetect import detect, LangDetectException
 
 def tokenize_sharegpt_examples(example, tokenizer, max_length):
     conversation = ""
@@ -13,7 +14,8 @@ def tokenize_sharegpt_examples(example, tokenizer, max_length):
         if len(conversation) > max_length:
             conversation = conversation[:max_length]
             break
-    return tokenizer(text=conversation, padding=False)
+    outputs = tokenizer(text=conversation, padding=False)
+    return outputs
 
 def create_sharegpt_train_test_val(train_size=0.8, test_size=0.1, seed=0):
     assert train_size != 0
@@ -34,6 +36,10 @@ def get_sharegpt_dataloaders(batch_size, tokenizer, max_length, train_size=0.8, 
     def tokenizer_wrapper(example):
         return tokenize_sharegpt_examples(example, tokenizer, max_length)
 
+    # Remove non english items.
+    train = train.filter(lambda x: is_english(x["conversations"]["value"][0]))
+    val = val.filter(lambda x: is_english(x["conversations"]["value"][0]))
+    test = test.filter(lambda x: is_english(x["conversations"]["value"][0]))
     train = train.map(tokenizer_wrapper, batched=False)
     test = test.map(tokenizer_wrapper, batched=False)
     val = val.map(tokenizer_wrapper, batched=False)
@@ -46,3 +52,10 @@ def get_sharegpt_dataloaders(batch_size, tokenizer, max_length, train_size=0.8, 
     test_loader = DataLoader(test, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=True))
     val_loader = DataLoader(val, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=True))
     return train_loader, test_loader, val_loader
+
+def is_english(text):
+    """Return True if the detected language of the text is English."""
+    try:
+        return detect(text) == 'en'
+    except LangDetectException:
+        return False

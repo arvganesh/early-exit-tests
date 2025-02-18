@@ -6,6 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from transformers import get_linear_schedule_with_warmup
 from datasets import load_dataset
+from data_utils import custom_collate_fn
 import wandb
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Literal
@@ -33,17 +34,17 @@ parser.add_argument(
     help="The transformer layer number that you want to target."
 )
 parser.add_argument(
+    "--seed",
+    type=int,
+    default=0,
+    help="Seed for dataset split."
+)
+parser.add_argument(
     "--loss_type",
     type=str,
     choices=["perplexity", "kl_divergence", "combined"],
     default="perplexity",
     help="Type of loss to use during training."
-)
-parser.add_argument(
-    "--kl_temperature",
-    type=float,
-    default=2.0,
-    help="Temperature value for KL divergence."
 )
 parser.add_argument(
     "--batch_size",
@@ -70,16 +71,16 @@ parser.add_argument(
     help="Learning rate for the optimizer."
 )
 parser.add_argument(
+    "--warmup_step_ratio",
+    type=float,
+    default=0.1,
+    help="Percent of total steps that should be used to warm up the linear rate scheduler."
+)
+parser.add_argument(
     "--max_length",
     type=int,
     default=4096,
     help="Maximum sequence length for the tokenizer."
-)
-parser.add_argument(
-    "--output_dir",
-    type=str,
-    default="llama_tuned_head_output",
-    help="Directory where the trained model and optimizer state will be saved."
 )
 parser.add_argument(
     "--device",
@@ -97,6 +98,13 @@ parser.add_argument(
     action="store_true",
     help="Randomly initializes the LM head to train."
 )
+parser.add_argument(
+    "--output_dir",
+    type=str,
+    help="Directory for training artifacts"
+)
+
+parser.add_argument()
 args = parser.parse_args()
 print(args)
 
@@ -125,7 +133,8 @@ model.to(args.device)
 # train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True, collate_fn=data_collator)
 # val_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=True)
 
-train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = args.loss_type == "cross_entropy")
+train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = args.loss_type == "cross_entropy", seed=args.seed)
+args["dataset"] = "shareGPT with non-english removed"
 
 # Uncomment to use SlimPJ
 # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -133,51 +142,33 @@ train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max
 # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True)
 # val_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=True)
 
-# train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train", num_proc=8)
+# train_dataset = load_dataset("DKYoon/SlimPajama-6B", split="train", num_proc=8)
 # tokenized_dataset = train_dataset.map(lambda example: 
 #                                     tokenizer(
 #                                         text=example["text"],
-#                                         padding=False
+#                                         padding=False,
+#                                         max_length=args.max_length,
 #                                     ),
 #                                     batched=False)
 # tokenized_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-# train_loader = DataLoader(tokenized_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer))
+# train_loader = DataLoader(tokenized_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=False))
 
-max_lr = args.learning_rate
-min_lr = max_lr * 0.1
+
+# train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train", num_proc=8)
+
 max_steps = args.max_steps
-warmup_steps = max_steps * 0.05
 grad_accumulate_steps = args.grad_accumulate_steps
-lr_decay = False
-weight_decay = 0.01
 
-# Linear learning rate scheduler with warmup + decay
-def get_lr(it, decay=False):
-    if it < warmup_steps:
-        return max_lr * (it+1) / warmup_steps
-    if decay:
-        if it > max_steps:
-            return min_lr
-        return min_lr + (max_lr - min_lr) * (max_steps - it) / (max_steps - warmup_steps)
-    else:
-        return max_lr
+notes = input("Please enter some notes about this run: ")
+notes = notes.strip()
 
 # Initialize wandb
 if args.wandb:
     wandb.init(
         project="llama-truncated-head",
-        config={
-            "loss_type": args.loss_type,
-            "target_layer": args.target_layer,
-            "kl_temperature": args.kl_temperature,
-            "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
-            "max_length": args.max_length,
-            "output_dir": args.output_dir,
-            "warmup steps": warmup_steps,
-            "LR decay": lr_decay,
-            "weight_decay": weight_decay
-        }
+        config=args,
+        mode="online",
+        notes=notes
     )
 
 # Weight decay, initial learning rate, set basic hyperparams.
@@ -189,24 +180,24 @@ optimizer = torch.optim.AdamW(model.parameters(),
                               eps=1e-8, 
                               fused=use_fused)
 scheduler = get_linear_schedule_with_warmup(optimizer,
-                                            num_warmup_steps=int(max_steps * 0.1),
-                                            num_training_steps=max_steps)
+                                            num_warmup_steps=int(args.max_steps * args.warmup_step_ratio),
+                                            num_training_steps=args.max_steps)
 
 # Training stats.
 print(f"Max Steps: {max_steps}")
 print(f"Warmup Steps: {warmup_steps}")
 print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size}")
 
-run_name = f"kl_div_model.{datetime.now()}"
+run_name = f"layer{args.target_layer}_{args.max_steps}steps_begin{time.time()}"
 
-for step in range(max_steps):
+gradients = {}
+for step in range(args.max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
     for mini_step in range(grad_accumulate_steps):
         next_batch = next(iter(train))
         input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
         input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
-        labels = None
         if args.loss_type == "cross_entropy":
             labels = labels.to(args.device)
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
@@ -217,14 +208,39 @@ for step in range(max_steps):
         loss_accum += loss.detach()
         loss.backward()
 
-    if step % 500 == 0:
-        torch.save(model.new_lm_head.state_dict(), f"../../models/{run_name}_{step}_{loss_accum:.2f}.pt")
+    if step % 500 == 0 or step == args.max_steps - 1 or step == 0:
+        model_path = "{args.output_dir}/{run_name}/model_{step}_{loss_accum:.2f}.pt"
+        save_path = os.path.join(args.output_dir, model_path)
+        torch.save(model.new_lm_head.state_dict(), save_path)
+        model.eval()
+        val_accum = 0.0
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(val):
+                if batch_idx >= 50:
+                    break
+                input_ids, attention_mask, labels = batch["input_ids"],  batch["attention_mask"], batch["labels"]
+                input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+                if args.loss_type == "cross_entropy":
+                    labels = labels.to(args.device)
+                with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
+                    outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
+                val_loss = outputs["loss"]
+                val_loss /= grad_accumulate_steps
+                val_accum += val_loss.detach()
+        model.train()
+        print(f"Validation Loss: {val_accum}")
+        if args.wandb:
+            wandb.log({"val/loss": val_accum}, step=step)
+
+            for name, param in model.named_parameters():
+                if param.grad is not None:
+                    print("Name:", name)
+                    gradients[f"gradients/{step}/{name}"] = wandb.Histogram(param.grad.detach().cpu().numpy())
+        
+            wandb.log(gradients, step=step)
 
     # Clip gradients and step.
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    # lr = get_lr(step, lr_decay)
-    # for param_group in optimizer.param_groups:
-    #     param_group['lr'] = lr
     optimizer.step()
     optimizer.zero_grad()
     scheduler.step()
@@ -232,33 +248,9 @@ for step in range(max_steps):
     current_lr = optimizer.param_groups[0]['lr']
 
     # Log training stats.
-    print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {current_lr}")
+    print(f"Step {step}, Train Loss: {loss_accum}, Learning Rate {current_lr}, Grad Norm: {norm}")
     if args.wandb:
-        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": current_lr})
-
-# evaluate average perplexity over test dataset
-# Get data tensors, move to device.
-with torch.no_grad():
-    early_exit_perplexity = 0
-    expected_perplexity = 0
-    total_tokens = 0
-    for batch in val:
-        input_ids, attention_mask, labels = batch["input_ids"], batch["attention_mask"], batch["labels"]
-        input_ids, attention_mask, labels = input_ids.to(args.device), attention_mask.to(args.device), labels.to(args.device)
-        with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type="cross_entropy", keep_og_logits=True)
-
-        loss, logits = outputs["loss"], outputs["logits"]
-        batch_tokens = attention_mask.sum().item()
-        early_exit_perplexity += loss.item() * batch_tokens
-        
-        og_logits = outputs["og_lm_logits"]
-        og_loss = F.cross_entropy(og_logits.view(-1, og_logits.size(-1)), labels.view(-1)).item()
-        expected_perplexity += og_loss * batch_tokens
-        total_tokens += batch_tokens
-
-
-print(f"exp: {expected_perplexity / total_tokens}, actual: {early_exit_perplexity / total_tokens}")
+        wandb.log({"train/loss": loss_accum, "train/grad_norm": norm, "train/lr": current_lr}, step=step)
 
 if args.wandb:
     wandb.finish()
