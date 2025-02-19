@@ -103,8 +103,12 @@ parser.add_argument(
     type=str,
     help="Directory for training artifacts"
 )
-
-parser.add_argument()
+parser.add_argument(
+    "--notes",
+    type=str,
+    required=True,
+    help="Notes about the run."
+)
 args = parser.parse_args()
 print(args)
 
@@ -134,7 +138,7 @@ model.to(args.device)
 # val_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=True)
 
 train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = args.loss_type == "cross_entropy", seed=args.seed)
-args["dataset"] = "shareGPT with non-english removed"
+DATASET_DESC = "shareGPT with non-english removed"
 
 # Uncomment to use SlimPJ
 # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -156,19 +160,15 @@ args["dataset"] = "shareGPT with non-english removed"
 
 # train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train", num_proc=8)
 
-max_steps = args.max_steps
-grad_accumulate_steps = args.grad_accumulate_steps
-
-notes = input("Please enter some notes about this run: ")
-notes = notes.strip()
+args.notes += f"\nDataset: {DATASET_DESC}"
 
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="llama-truncated-head",
+        project="Early Exiting Llama 3.2 1B Instruct",
         config=args,
         mode="online",
-        notes=notes
+        notes=args.notes
     )
 
 # Weight decay, initial learning rate, set basic hyperparams.
@@ -184,17 +184,18 @@ scheduler = get_linear_schedule_with_warmup(optimizer,
                                             num_training_steps=args.max_steps)
 
 # Training stats.
-print(f"Max Steps: {max_steps}")
-print(f"Warmup Steps: {warmup_steps}")
-print(f"Effective Batch Size: {grad_accumulate_steps * args.batch_size}")
+print(f"Max Steps: {args.max_steps}")
+print(f"Warmup Steps: {int(args.max_steps * args.warmup_step_ratio)}")
+print(f"Effective Batch Size: {args.grad_accumulate_steps * args.batch_size}")
 
-run_name = f"layer{args.target_layer}_{args.max_steps}steps_begin{time.time()}"
+run_name = f"layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
+os.mkdir(os.path.join(args.output_dir, run_name))
 
 gradients = {}
 for step in range(args.max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
-    for mini_step in range(grad_accumulate_steps):
+    for mini_step in range(args.grad_accumulate_steps):
         next_batch = next(iter(train))
         input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
         input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
@@ -204,19 +205,19 @@ for step in range(args.max_steps):
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
 
         loss, logits = outputs["loss"], outputs["logits"]
-        loss = loss / grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
+        loss = loss / args.grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
         loss_accum += loss.detach()
         loss.backward()
 
-    if step % 500 == 0 or step == args.max_steps - 1 or step == 0:
-        model_path = "{args.output_dir}/{run_name}/model_{step}_{loss_accum:.2f}.pt"
+    if step % 1000 == 0 or step == args.max_steps - 1 or step == 0:
+        model_path = f"{args.output_dir}/{run_name}/model_{step}_{loss_accum:.2f}.pt"
         save_path = os.path.join(args.output_dir, model_path)
         torch.save(model.new_lm_head.state_dict(), save_path)
         model.eval()
         val_accum = 0.0
         with torch.no_grad():
             for batch_idx, batch in enumerate(val):
-                if batch_idx >= 50:
+                if batch_idx >= 100:
                     break
                 input_ids, attention_mask, labels = batch["input_ids"],  batch["attention_mask"], batch["labels"]
                 input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
@@ -225,7 +226,7 @@ for step in range(args.max_steps):
                 with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
                     outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
                 val_loss = outputs["loss"]
-                val_loss /= grad_accumulate_steps
+                val_loss /= args.grad_accumulate_steps
                 val_accum += val_loss.detach()
         model.train()
         print(f"Validation Loss: {val_accum}")
