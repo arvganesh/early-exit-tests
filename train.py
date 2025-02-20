@@ -189,7 +189,9 @@ print(f"Warmup Steps: {int(args.max_steps * args.warmup_step_ratio)}")
 print(f"Effective Batch Size: {args.grad_accumulate_steps * args.batch_size}")
 
 run_name = f"layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
-os.mkdir(os.path.join(args.output_dir, run_name))
+model_folder = args.model_path.split("/")[1]
+save_folder = os.path.join(args.output_dir, model_folder, run_name)
+os.makedirs(save_folder)
 
 gradients = {}
 for step in range(args.max_steps):
@@ -210,8 +212,7 @@ for step in range(args.max_steps):
         loss.backward()
 
     if step % 1000 == 0 or step == args.max_steps - 1 or step == 0:
-        model_path = f"{args.output_dir}/{run_name}/model_{step}_{loss_accum:.2f}.pt"
-        save_path = os.path.join(args.output_dir, model_path)
+        save_path = os.path.join(save_folder, f"model_{step}_{loss_accum:.2f}.pt")
         torch.save(model.new_lm_head.state_dict(), save_path)
         model.eval()
         val_accum = 0.0
@@ -286,7 +287,6 @@ if args.wandb:
 #         "step": step,
 #         # "val_loss": val_accum
 #     }, f"./models/xsum1/llama-trunc-{step}step")
-
 # Generate from model every 100 steps.
 # .generate() uses autocast.
 # if step % 100 == 0 or step == max_steps - 1:
