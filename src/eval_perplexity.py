@@ -7,6 +7,7 @@ from truncated_llama import TruncatedLlama
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from transformers import get_linear_schedule_with_warmup
 from share_gpt_dataset import get_sharegpt_dataloaders
+from data_utils import get_toy_dataloaders
 
 parser = argparse.ArgumentParser(description="Evaluate the perplexity of trained vs. baseline models.")
 parser = argparse.ArgumentParser(description="Train a truncated Llama model with a tuned head.")
@@ -74,7 +75,7 @@ model = TruncatedLlama(args.model_path,
                        early_exit_idx=args.target_layer,
                        lm_head_random_init=args.lm_head_random_init, 
                        use_flash_attn=False)
-model.new_lm_head.load_state_dict(torch.load(args.weights_to_load))
+model.new_lm_head.load_state_dict(torch.load(args.weights_to_load, map_location=args.device))
 model.eval()
 # model = torch.compile(model) if args.device == "cuda" else model
 model.to(args.device)
@@ -82,7 +83,8 @@ model.to(args.device)
 tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 tokenizer.pad_token = tokenizer.eos_token
 
-train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = True)
+#train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = True)
+train, test, val = get_toy_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = True)
 
 llama_model = AutoModelForCausalLM.from_pretrained(args.model_path)
 llama_model.to(args.device)
@@ -93,10 +95,14 @@ def get_untuned_perplexity(model, input_ids, attention_mask, labels, target_laye
     with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
         output = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
     hidden_states = output.hidden_states[target_layer + 1]
-    early_exit_logits = model.lm_head(model.model.norm(hidden_states))
-    
-    assert torch.equal(early_exit_logits, output.logits) 
-    
+
+    # If we aren't early exiting, RMSNorm is already applied to the final transformer layer's hidden states.
+    if target_layer + 1 == len(hidden_states) - 1:
+        print("not applying norm")
+        early_exit_logits = model.lm_head(hidden_states)
+    else:
+        early_exit_logits = model.lm_head(model.model.norm(hidden_states))
+     
     # Compute perplexity (averaged across the entire batch).
     perplexity = F.cross_entropy(early_exit_logits.view(-1, early_exit_logits.size(-1)), labels.view(-1)).item()
     return perplexity
@@ -131,6 +137,7 @@ with torch.no_grad():
             print("almost there")
 print(f"baseline llama: {baseline_llama_perp / total_tokens}, finetuned early-exit: {early_exit_ft_perp / total_tokens}, early_exit baseline: {early_exit_base_perp / total_tokens}")
 
+"""
 prompt = "Hello! I'm a language model."
 inputs = tokenizer(prompt, return_tensors="pt")
 og_input_ids = inputs["input_ids"]
@@ -149,3 +156,4 @@ llama_text = tokenizer.decode(llama_outputs[0], skip_special_tokens=True)
 print(my_text)
 print(" ------ ")
 print(llama_text)
+"""
