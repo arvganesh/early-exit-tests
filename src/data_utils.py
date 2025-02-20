@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 import math
 
 def custom_collate_fn(batch, tokenizer, generate_labels=True):
@@ -48,3 +49,44 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True):
         "attention_mask": attention_mask,
         "labels": labels
     }
+
+def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = True):
+    dataset = [
+        "abcdefghij",
+        "klmnopqrst",
+        "uvwxyzabcd",
+        "HelloWorld!",
+        "DataScience",
+        "MachineLearn",
+        "DeepLearning",
+        "ArtificialNN",
+        "ChatGPTModel",
+        "OpenAI_Rocks",
+        "QuantumLeap",
+        "NeuralNet123",
+        "CodingIsFun!",
+        "StackOverflow",
+        "PythonRocks!",
+        "LambdaCalculus",
+        "TensorCompute",
+        "VariableNames",
+        "AlgorithmX",
+        "SynthesizeData"
+    ]
+
+
+    def tokenizer_wrapper(example):
+        inputs = tokenizer(example, padding=False)
+        inputs["input_ids"] = torch.tensor(inputs["input_ids"])
+        inputs["attention_mask"] = torch.tensor(inputs["attention_mask"])
+        return inputs
+
+    train_set = list(map(tokenizer_wrapper, dataset[:10]))
+    test_set = list(map(tokenizer_wrapper, dataset[10:15]))
+    val_set = list(map(tokenizer_wrapper, dataset[15:]))
+
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
+
+    return train_loader, test_loader, val_loader

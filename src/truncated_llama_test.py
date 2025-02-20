@@ -1,11 +1,15 @@
 import torch
 import numpy as np
 import random
+import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from pprint import pprint
 from truncated_llama import TruncatedLlama
-from data_utils import custom_collate_fn
+from data_utils import custom_collate_fn, get_toy_dataloaders
+
+parser = argparse.ArgumentParser(prog="Early Exiting Llama Testing")
+parser.add_argument("-d", "--device", type=str)
 
 # Make sure results are deterministic.
 SEED = 0
@@ -27,8 +31,9 @@ def test_same_output_with_last_layer_exit():
     prompt = "Hello!"
     inputs = tokenizer(prompt, return_tensors="pt")
     fake_inputs = tokenizer(prompt, return_tensors="pt")
-    truth_outputs = truth_model(inputs["input_ids"])
-    test_outputs = test_model(fake_inputs["input_ids"], loss_type="kl_divergence")
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        truth_outputs = truth_model(inputs["input_ids"])
+        test_outputs = test_model(fake_inputs["input_ids"], loss_type="kl_divergence")
 
     truth_logits, actual_logits = truth_outputs["logits"], test_outputs["logits"]
     test_loss = test_outputs["loss"]
@@ -84,10 +89,21 @@ def test_collate():
     pprint(collated_batch)
 
     # Assert that padding happened
-    expected_shape = (len(batch), 5)
+    expected_shape = (len(batch), 8) # Round up to nearest power of two.
     for key in collated_batch:
         assert collated_batch[key].shape == expected_shape
 
     # Assert that padding tokens are correct.
     assert (collated_batch["labels"][0, :] == torch.Tensor([284, 12, 53, 88, -100])).all()
     assert (collated_batch["labels"][1, :] == torch.Tensor([123, -100, -100, -100, -100])).all()
+
+def test_toy_dataloader():
+    model_path = "meta-llama/llama-3.2-1B"
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    batch_size = 2
+    max_length = 64
+    train, test, val = get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = True)
+    train_batch = next(iter(train))
+    input_ids = train_batch["input_ids"]
+    assert input_ids.size(0) == batch_size
