@@ -64,9 +64,10 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-# torch.manual_seed(0)
-# numpy.random.seed(0)
-# random.seed(0)
+torch.manual_seed(0)
+numpy.random.seed(0)
+random.seed(0)
+#torch.use_deterministic_algorithms(True)
 
 torch.set_float32_matmul_precision("high")
 model = TruncatedLlama(args.model_path, 
@@ -83,11 +84,29 @@ tokenizer.pad_token = tokenizer.eos_token
 
 train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = True)
 
+llama_model = AutoModelForCausalLM.from_pretrained(args.model_path)
+llama_model.to(args.device)
+llama_model.eval()
+
+def get_untuned_perplexity(model, input_ids, attention_mask, labels, target_layer):
+    # Get outputs from exit layer.
+    with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
+        output = model(input_ids, attention_mask=attention_mask, output_hidden_states=True)
+    hidden_states = output.hidden_states[target_layer + 1]
+    early_exit_logits = model.lm_head(model.model.norm(hidden_states))
+    
+    assert torch.equal(early_exit_logits, output.logits) 
+    
+    # Compute perplexity (averaged across the entire batch).
+    perplexity = F.cross_entropy(early_exit_logits.view(-1, early_exit_logits.size(-1)), labels.view(-1)).item()
+    return perplexity
+
 # evaluate average perplexity over test dataset
 # Get data tensors, move to device.
 with torch.no_grad():
-    early_exit_perplexity = 0
-    expected_perplexity = 0
+    early_exit_ft_perp = 0
+    early_exit_base_perp = 0
+    baseline_llama_perp = 0
     total_tokens = 0
     print(f"Num validation examples: {len(val)}")
     for idx, batch in enumerate(val):
@@ -97,14 +116,20 @@ with torch.no_grad():
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type="cross_entropy", keep_og_logits=True)
         loss, logits = outputs["loss"], outputs["logits"]
         batch_tokens = attention_mask.sum().item()
-        early_exit_perplexity += loss.item() * batch_tokens
+        early_exit_ft_perp += loss.item() * batch_tokens
+
         og_logits = outputs["og_lm_logits"]
         og_loss = F.cross_entropy(og_logits.view(-1, og_logits.size(-1)), labels.view(-1)).item()
-        expected_perplexity += og_loss * batch_tokens
+        baseline_llama_perp += og_loss * batch_tokens
+
+        early_exit_base_perp += get_untuned_perplexity(llama_model, input_ids, attention_mask, labels, 15) * batch_tokens
+
+        print(baseline_llama_perp, early_exit_base_perp)
+
         total_tokens += batch_tokens
         if idx % 1000 == 0:
             print("almost there")
-print(f"exp: {expected_perplexity / total_tokens}, actual: {early_exit_perplexity / total_tokens}")
+print(f"baseline llama: {baseline_llama_perp / total_tokens}, finetuned early-exit: {early_exit_ft_perp / total_tokens}, early_exit baseline: {early_exit_base_perp / total_tokens}")
 
 prompt = "Hello! I'm a language model."
 inputs = tokenizer(prompt, return_tensors="pt")
@@ -114,10 +139,6 @@ og_input_ids = og_input_ids.to(args.device)
 inputs = tokenizer(prompt, return_tensors="pt")
 actual_input_ids = inputs["input_ids"]
 actual_input_ids = actual_input_ids.to(args.device)
-
-llama_model = AutoModelForCausalLM.from_pretrained(args.model_path)
-llama_model.to(args.device)
-llama_model.eval()
 
 my_outputs = model.generate(actual_input_ids, 20, tokenizer.eos_token_id)
 llama_outputs = llama_model.generate(input_ids=og_input_ids, max_new_tokens=20)
