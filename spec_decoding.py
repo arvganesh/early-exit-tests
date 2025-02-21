@@ -101,9 +101,10 @@ def temperature_softmax(logits, temp=1.0):
 with torch.no_grad():
     prompt = "Hi! I'm a language model."
     tokenizer_out = tokenizer(prompt, return_tensors="pt")
-    input_ids = tokenizer_out["input_ids"].to(args.device)
-    
+    prompt_ids = tokenizer_out["input_ids"]
+    prompt_len = prompt_ids.size(-1) 
     if args.vanilla_decode:
+        input_ids = prompt_ids.to(args.device)
         start = time.time()
         for _ in range(args.num_vanilla_tok):
             target_out = target_model(input_ids)
@@ -119,31 +120,41 @@ with torch.no_grad():
     else:
         num_tokens_generated = 0
         start = time.time()
+        
+        max_token_amt = prompt_len + args.num_iters * (args.speculate_len + 1)
+        input_ids = torch.zeros((1, max_token_amt), dtype=prompt_ids.dtype).to(args.device)
+        attn_mask = torch.zeros((1, max_token_amt)).to(args.device) 
+        attn_mask[:, :prompt_len] = 1
+        input_ids[:, :prompt_len] = prompt_ids[:, :]
+
         for num_iters in range(args.num_iters):
             # Get draft tokens
-            input_length = input_ids.size(-1)
+            input_length = prompt_len + num_tokens_generated
             for i in range(args.speculate_len):
-                draft_out = draft_model(input_ids) 
-                logits = draft_out.logits[:, -1, :]
+                draft_out = draft_model(input_ids, attention_mask=attn_mask) 
+                logits = draft_out.logits[:, input_length + i - 1, :]
                 probs = temperature_softmax(logits, temp=args.softmax_temperature)
                 sample = torch.multinomial(probs, 1)
-                input_ids = torch.cat((input_ids, sample), dim=-1)
+                input_ids[:, input_length + i] = sample.item()
+                attn_mask[:, input_length + i] = 1
            
             # Verify with target.
-            target_out = target_model(input_ids)
+            target_out = target_model(input_ids, attention_mask=attn_mask)
             target_probs = temperature_softmax(target_out.logits, temp=args.softmax_temperature)
             draft_probs = temperature_softmax(draft_out.logits, temp=args.softmax_temperature) 
-
+            
             # Find disagreement point.
             agree_length = 0
-            randoms = torch.rand(args.speculate_len)
+            randoms = torch.rand(args.speculate_len).to(args.device)
+            likelihood = target_probs / draft_probs
+            speculated_idxs = input_ids[:, input_length : input_length + args.speculate_len]
+            speculated_likelihoods = likelihood[:, torch.arange(input_length - 1, input_length - 1 + args.speculate_len), speculated_idxs]
+            agreements = speculated_likelihoods > randoms
             for i in range(args.speculate_len):
-                sample_idx = input_ids[0, input_length + i].cpu().item()
-                likelihood = target_probs[:, input_length + i - 1, sample_idx].item() / draft_probs[:, input_length + i - 1, sample_idx].item()
-                if likelihood < randoms[i]:
+                if not agreements[:, :, i]:
                     break
                 agree_length += 1
-                
+               
             # Fix the disagreed upon sample if needed.
             disagree_idx = input_length + agree_length 
             if agree_length < args.speculate_len:
@@ -152,12 +163,10 @@ with torch.no_grad():
                 fix_dist = torch.clamp(target_dist - draft_dist, min=0)
                 fix_dist /= fix_dist.sum()
                 new_token = torch.multinomial(fix_dist, 1)
-                input_ids[:, disagree_idx] = new_token
-                input_ids = input_ids[:, :disagree_idx + 1]
             else:
                 new_token = torch.multinomial(target_probs[:, -1, :], 1)
-                input_ids = torch.cat((input_ids, new_token), dim=-1)
 
+            input_ids[:, disagree_idx] = new_token
             num_tokens_generated += agree_length + 1
             
         torch.cuda.synchronize()
