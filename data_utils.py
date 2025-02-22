@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import math
 
-def custom_collate_fn(batch, tokenizer, generate_labels=True):
+def custom_collate_fn(batch, tokenizer, generate_labels=True, nice_shape=True):
     """
     Expect the batch to look like this:
     [
@@ -20,7 +20,8 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True):
 
     # Pad to the max length item for the entire batch, rounded up to nearest power of two.
     batch_length = max([len(elem["input_ids"]) for elem in batch])
-    batch_length = 2 ** math.ceil(math.log(batch_length, 2))
+    if nice_shape:
+        batch_length = 2 ** math.ceil(math.log(batch_length, 2))
 
     input_ids = torch.stack([F.pad(elem["input_ids"], 
                             (0, batch_length - len(elem["input_ids"])),
@@ -50,7 +51,7 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True):
         "labels": labels
     }
 
-def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = True):
+def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = True, nice_shape = True):
     dataset = [
         "abcdefghij",
         "klmnopqrst",
@@ -85,8 +86,8 @@ def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = Tru
     test_set = list(map(tokenizer_wrapper, dataset[10:15]))
     val_set = list(map(tokenizer_wrapper, dataset[15:]))
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
-    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels))
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
+    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
 
     return train_loader, test_loader, val_loader
