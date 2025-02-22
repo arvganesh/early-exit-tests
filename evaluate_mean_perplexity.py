@@ -89,7 +89,7 @@ torch.set_float32_matmul_precision("high")
 model = TruncatedLlama(args.model_path, 
                        early_exit_idx=args.target_layer,
                        lm_head_random_init=args.lm_head_random_init, 
-                       use_flash_attn=False)
+                       use_flash_attn=True)
 model.new_lm_head.load_state_dict(torch.load(args.weights_to_load, map_location=args.device))
 model.eval()
 # model = torch.compile(model) if args.device == "cuda" else model
