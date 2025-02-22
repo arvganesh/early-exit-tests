@@ -6,14 +6,12 @@ from transformers.modeling_outputs import MaskedLMOutput
 from typing import List, Tuple
 
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False):
+    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False, use_lora = False):
         super().__init__()
         if use_flash_attn:
             model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
         else:
             model = LlamaForCausalLM.from_pretrained(model_path)
-
-        print(model)
 
         # Freeze all parameters
         for param in model.parameters():
@@ -34,15 +32,11 @@ class TruncatedLlama(nn.Module):
         if not lm_head_random_init:
             self.new_lm_head.load_state_dict(self.og_lm_head.state_dict())
 
-        for param in self.new_lm_head.parameters():
-            param.requires_grad = True
+        if not use_lora:
+            for param in self.new_lm_head.parameters():
+                param.requires_grad = True
 
-        # Print the number of parameters in the model
-        num_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        total = sum(p.numel() for p in self.parameters())
-        print(f"Number of trainable parameters in the model: {num_trainable}")
-        print(f"Number of parameters in the model: {total}")
-
+        
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None, keep_og_logits=False):
         # Apply RMSNorm to early exit activations (embeddings already applied).
         final_layer_activations = self.headless_model(input_ids, attention_mask=attention_mask)
@@ -103,3 +97,11 @@ class TruncatedLlama(nn.Module):
             if next_token == eos_token_id:
                 break
         return input_ids
+
+    def print_trainable_parameters(self):
+        # Print the number of parameters in the model
+        num_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        print(f"Number of trainable parameters in the model: {num_trainable} | {num_trainiable * 100 / total:.3f}")
+        print(f"Number of parameters in the model: {total}")
+
