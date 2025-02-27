@@ -89,7 +89,7 @@ def temperature_softmax(logits, temp=1.0):
     return torch.softmax(logits, dim=-1)
 
 
-temps = [1.0, 0.5, 0.2]
+temps = [args.softmax_temperature]
 
 base_path = "/scratch/10543/arvganesh/models/Llama-3.2-1B-Instruct/"
 
@@ -115,7 +115,6 @@ for path in model_paths:
     folder_name = path.split("/")[0]
     layer_name = folder_name.split("_")[0]
     layer_idx = int(layer_name[len("layer"):])
-    print(layer_idx)
     model = TruncatedLlama(args.model_path, 
                            early_exit_idx=layer_idx,
                        lm_head_random_init=False,
@@ -130,6 +129,7 @@ for path in model_paths:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed)
         random.seed(args.seed)
+        print(f"Evaluating at temp={temp}")
         with torch.no_grad():
             if args.toy_dataset:
                 train, test, val = get_toy_dataloaders(1, tokenizer, args.max_length, generate_labels = True, nice_shape = False)
@@ -162,6 +162,13 @@ for path in model_paths:
                     og_probs = temperature_softmax(og_logits, temp=temp) 
                     og_sample = torch.multinomial(og_probs, 1)
 
+                    """
+                    For speculative decoding, there are two cases where disagreement can occur:
+                    
+                    1. Sampled tokens don't match.
+                    2. Sampled tokens match, but we "oversampled" in the draft model and reject the original token. 
+                    After resampling from an adjusted distribution, we might disagree.
+                    """
                     if not torch.equal(ee_sample, og_sample):
                         if should_print:
                             print(f"ee_tok: {ee_sample.item()} og_tok: {og_sample.item()}")
@@ -171,9 +178,19 @@ for path in model_paths:
                             print(f"P({og_sample.item()} in OG_MODEL) = {og_probs[0, og_sample.item()]}")
                         break
                     else:
-                        # reject sample
-                        if ee_probs[ee_sample] < og_probs[og_sample]:
-                   
+                        # We oversampled from the draft model. 
+                        sample = ee_sample[0].item()
+                        if ee_probs[:, sample] > og_probs[:, sample]:
+                            # Accept sample with probability = og_probs[sample] / ee_probs[sample].
+                            random_num = torch.rand(1)
+                            if random_num[0] >= og_probs[:, sample] / ee_probs[:, sample]:
+                                # If we reject, sample from modified distribution.
+                                new_probs = torch.clamp(og_probs - ee_probs, min=0)
+                                new_probs /= new_probs.sum()
+                                new_sample = torch.multinomial(new_probs, 1)
+                                if new_sample[0].item() != sample:
+                                    break
+               
                     agreement_length += 1
                     input_ids = torch.cat((input_ids, ee_sample), dim=1)
                 
@@ -201,5 +218,5 @@ for path in model_paths:
         agreement_stats_all[path] = agreement_stats_mdl
 
 # Write the per-layer agreement stats into a single JSON file
-with open("agreement_stats_by_layer_corrected.json", "w") as outfile:
+with open(f"agreement_stats_by_layer_{temps[0]}.json", "w") as outfile:
     json.dump(agreement_stats_all, outfile, indent=4)
