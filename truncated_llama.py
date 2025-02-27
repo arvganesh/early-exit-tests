@@ -6,7 +6,7 @@ from transformers.modeling_outputs import MaskedLMOutput
 from typing import List, Tuple
 
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False, use_lora = False):
+    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False, use_lora = False, ft_last_transformer = False):
         super().__init__()
         if use_flash_attn:
             model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
@@ -35,6 +35,9 @@ class TruncatedLlama(nn.Module):
         if not use_lora:
             for param in self.new_lm_head.parameters():
                 param.requires_grad = True
+            if ft_last_transformer:
+                for param in self.headless_model.layers[early_exit_idx].parameters():
+                    param.required_grad = True
 
         
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None, keep_og_logits=False):
@@ -102,6 +105,6 @@ class TruncatedLlama(nn.Module):
         # Print the number of parameters in the model
         num_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
-        print(f"Number of trainable parameters in the model: {num_trainable} | {num_trainiable * 100 / total:.3f}")
+        print(f"Number of trainable parameters in the model: {num_trainable} | {num_trainable * 100 / total:.3f}")
         print(f"Number of parameters in the model: {total}")
 

@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
+from peft import LoraModel, LoraConfig
 from transformers import get_linear_schedule_with_warmup
 from datasets import load_dataset
 from data_utils import custom_collate_fn
@@ -109,6 +110,31 @@ parser.add_argument(
     required=True,
     help="Notes about the run."
 )
+parser.add_argument(
+    "--use_lora",
+    action="store_true",
+    help="Enables PEFT with LoRA"
+)
+parser.add_argument(
+    "--lora_r",
+    type=int,
+    help="Rank for LoRA"
+)
+parser.add_argument(
+    "--use_rslora",
+    action="store_true",
+    help="enable to use rank stabilized lora"
+)
+parser.add_argument(
+    "--lora_alpha",
+    type=int,
+    help="Alpha for LoRA"
+)
+parser.add_argument(
+    "--ft_last_transformer",
+    action="store_true",
+    help="finetune last transformer layer"
+)
 args = parser.parse_args()
 print(args)
 
@@ -125,7 +151,15 @@ torch.set_float32_matmul_precision("high")
 model = TruncatedLlama(args.model_path, 
                        early_exit_idx=args.target_layer,
                        lm_head_random_init=args.lm_head_random_init, 
-                       use_flash_attn=False)
+                       use_flash_attn=False,
+                       use_lora=args.use_lora,
+                       ft_last_transformer=args.ft_last_transformer)
+
+if args.use_lora:
+    cfg = LoraConfig(r = args.lora_r, lora_alpha = args.lora_alpha, use_rslora = args.use_rslora, target_modules = ["new_lm_head"], lora_dropout = 0.1, bias="none")
+    model = LoraModel(model, cfg, "lm-head-adapter")
+
+model.print_trainable_parameters()
 model.train()
 # model = torch.compile(model) if args.device == "cuda" else model
 model.to(args.device)
@@ -213,7 +247,16 @@ for step in range(args.max_steps):
 
     if step % 1000 == 0 or step == args.max_steps - 1 or step == 0:
         save_path = os.path.join(save_folder, f"model_{step}_{loss_accum:.2f}.pt")
-        torch.save(model.new_lm_head.state_dict(), save_path)
+        
+        if not args.use_lora:
+            torch.save(model.new_lm_head.state_dict(), save_path)
+        else:
+            pass
+            #lora_adapters = {
+            #        "A": 
+            #} 
+            #torch.save()
+
         model.eval()
         val_accum = 0.0
         with torch.no_grad():
