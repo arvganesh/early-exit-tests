@@ -5,7 +5,7 @@ import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from pprint import pprint
-from truncated_llama import TruncatedLlama
+from truncated_llama import TruncatedLlama, masked_kl_loss
 from data_utils import custom_collate_fn, get_toy_dataloaders
 
 parser = argparse.ArgumentParser(prog="Early Exiting Llama Testing")
@@ -41,6 +41,35 @@ def test_same_output_with_last_layer_exit():
     assert truth_logits.shape == actual_logits.shape
     assert (truth_logits == actual_logits).all()
     assert test_loss == 0
+
+def test_masked_kl_loss():
+    """
+    B: Batch size
+    T: Sequence Length
+    C: Vocab Size
+    """
+    B, T, C = 2, 2, 4
+
+    student_logits = torch.rand(B, T, C, dtype=torch.float32) 
+    teacher_logits = torch.rand(B, T, C, dtype=torch.float32) 
+    truth_KL = torch.nn.KLDivLoss(reduction='batchmean', log_target=True)
+    
+    # No masking should match regular batchmean KL div loss. 
+    all_ones = torch.ones(B, T)
+    my_loss = masked_kl_loss(student_logits, teacher_logits, all_ones)
+    actual_loss = truth_KL(student_logits, teacher_logits)
+    assert torch.isclose(my_loss, actual_loss)
+    
+    # With masking, we should remove certain entries.
+    all_zeros = torch.zeros(B, T) 
+    assert masked_kl_loss(student_logits, teacher_logits, all_zeros) == 0
+
+    # Add one entry back via mask, and it should be non-zero. 
+    all_zeros[0, 1] = 1
+    mask = all_zeros
+    loss = masked_kl_loss(student_logits, teacher_logits, mask)
+    actual_loss = truth_KL(student_logits[0, 1], teacher_logits[0, 1])
+    assert loss == actual_loss * 2
 
 def test_hidden_states_match_on_early_exit():
     model_path = "meta-llama/llama-3.2-1B"
@@ -78,24 +107,27 @@ def test_collate():
         {
         'input_ids': torch.Tensor([128000, 284, 12, 53, 88]), 
         'attention_mask': torch.Tensor([1, 1, 1, 1, 1]),
+        'loss_mask': torch.Tensor([0, 0, 1, 1, 0]),
         },
         {
         'input_ids': torch.Tensor([128000, 123]), 
         'attention_mask': torch.Tensor([1, 1]),
+        'loss_mask': torch.Tensor([0, 1]),
         }
     ]
     
-    collated_batch = custom_collate_fn(batch, tokenizer)
+    collated_batch = custom_collate_fn(batch, tokenizer, nice_shape=False)
     pprint(collated_batch)
 
     # Assert that padding happened
-    expected_shape = (len(batch), 8) # Round up to nearest power of two.
+    expected_shape = (len(batch), 5) # Round up to nearest power of two.
     for key in collated_batch:
         assert collated_batch[key].shape == expected_shape
 
     # Assert that padding tokens are correct.
     assert (collated_batch["labels"][0, :] == torch.Tensor([284, 12, 53, 88, -100])).all()
     assert (collated_batch["labels"][1, :] == torch.Tensor([123, -100, -100, -100, -100])).all()
+    assert torch.equal(collated_batch["loss_mask"][1, :], torch.Tensor([1, 0, 0, 0, 0]))
 
 def test_toy_dataloader():
     model_path = "meta-llama/llama-3.2-1B"
@@ -106,4 +138,7 @@ def test_toy_dataloader():
     train, test, val = get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = True)
     train_batch = next(iter(train))
     input_ids = train_batch["input_ids"]
+    attention_mask = train_batch["attention_mask"]
+    labels = train_batch["labels"]
+    print(input_ids, attention_mask, labels)
     assert input_ids.size(0) == batch_size
