@@ -199,7 +199,7 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="Early Exiting Llama 3.2 1B Instruct",
+        project="Early Exiting Llama 3.2 1B Instruct Loss Mask",
         config=args,
         mode="online",
         notes=args.notes
@@ -228,17 +228,19 @@ save_folder = os.path.join(args.output_dir, model_folder, run_name)
 os.makedirs(save_folder)
 
 gradients = {}
+
 for step in range(args.max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
-    for mini_step in range(args.grad_accumulate_steps):
+    for mini_step in range(args.grad_accumulate_steps): 
         next_batch = next(iter(train))
-        input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
+        input_ids, attention_mask, loss_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["loss_mask"], next_batch["labels"]
         input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+        loss_mask = loss_mask.to(args.device)
         if args.loss_type == "cross_entropy":
             labels = labels.to(args.device)
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
+            outputs = model(input_ids, attention_mask=attention_mask, kl_loss_mask=loss_mask, labels=labels, loss_type=args.loss_type)
 
         loss, logits = outputs["loss"], outputs["logits"]
         loss = loss / args.grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
@@ -263,12 +265,13 @@ for step in range(args.max_steps):
             for batch_idx, batch in enumerate(val):
                 if batch_idx >= 100:
                     break
-                input_ids, attention_mask, labels = batch["input_ids"],  batch["attention_mask"], batch["labels"]
+                input_ids, attention_mask, loss_mask, labels = batch["input_ids"],  batch["attention_mask"], batch["loss_mask"], batch["labels"]
                 input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+                loss_mask = loss_mask.to(args.device)
                 if args.loss_type == "cross_entropy":
                     labels = labels.to(args.device)
                 with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-                    outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
+                    outputs = model(input_ids, attention_mask=attention_mask, labels=labels, kl_loss_mask=loss_mask, loss_type=args.loss_type)
                 val_loss = outputs["loss"]
                 val_loss /= args.grad_accumulate_steps
                 val_accum += val_loss.detach()
