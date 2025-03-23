@@ -89,21 +89,10 @@ def temperature_softmax(logits, temp=1.0):
     return torch.softmax(logits, dim=-1)
 
 
-temps = [args.softmax_temperature]
+temps = [0.0, 0.2, 0.5, 1.0]
 
-base_path = "/scratch/10543/arvganesh/models/Llama-3.2-1B-Instruct/"
-
-model_paths = [
-    "layer14_50000steps_begin1739925501/model_45000_69.33.pt",
-    "layer13_50000steps_begin1740033556/model_46000_203.96.pt",
-    "layer12_50000steps_begin1740159899/model_46000_383.06.pt",
-    "layer11_50000steps_begin1740159912/model_46000_461.53.pt",
-    "layer10_50000steps_begin1740159934/model_46000_542.54.pt",
-    "layer9_50000steps_begin1740379558/model_47000_861.24.pt",
-    "layer8_50000steps_begin1740379772/model_47000_1161.50.pt",
-    "layer7_50000steps_begin1740379781/model_46000_1325.10.pt",
-    "layer6_50000steps_begin1740379796/model_46000_1208.03.pt"
-]
+base_path = "/scratch/10543/arvganesh/models/Llama-3.2-1B-Instruct/user_no_mask/"
+model_paths = [args.weights_to_load]
 
 agreement_stats_all = {}
 
@@ -111,7 +100,6 @@ agreement_stats_all = {}
 # Get data tensors, move to device.
 for path in model_paths:
     print(f"Evaluating {path}")
-
     folder_name = path.split("/")[0]
     layer_name = folder_name.split("_")[0]
     layer_idx = int(layer_name[len("layer"):])
@@ -177,20 +165,11 @@ for path in model_paths:
                             print(f"P({og_sample.item()} in EE_MODEL) = {ee_probs[0, og_sample.item()]}")
                             print(f"P({og_sample.item()} in OG_MODEL) = {og_probs[0, og_sample.item()]}")
                         break
-                    else:
+                    elif temp != 0:
                         # We oversampled from the draft model. 
                         sample = ee_sample[0].item()
                         if ee_probs[:, sample] > og_probs[:, sample]:
-                            # Accept sample with probability = og_probs[sample] / ee_probs[sample].
-                            random_num = torch.rand(1)
-                            if random_num[0] >= og_probs[:, sample] / ee_probs[:, sample]:
-                                # If we reject, sample from modified distribution.
-                                new_probs = torch.clamp(og_probs - ee_probs, min=0)
-                                new_probs /= new_probs.sum()
-                                new_sample = torch.multinomial(new_probs, 1)
-                                if new_sample[0].item() != sample:
-                                    break
-               
+                            break
                     agreement_length += 1
                     input_ids = torch.cat((input_ids, ee_sample), dim=1)
                 
@@ -217,6 +196,6 @@ for path in model_paths:
         }
         agreement_stats_all[path] = agreement_stats_mdl
 
-# Write the per-layer agreement stats into a single JSON file
-with open(f"agreement_stats_by_layer_{temps[0]}.json", "w") as outfile:
-    json.dump(agreement_stats_all, outfile, indent=4)
+    # Write the per-layer agreement stats into a single JSON file
+    with open(f"agreement_stats_by_layer{layer_idx}_{temps[0]}.json", "w") as outfile:
+        json.dump(agreement_stats_all, outfile, indent=4)

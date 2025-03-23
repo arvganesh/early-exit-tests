@@ -222,7 +222,7 @@ print(f"Max Steps: {args.max_steps}")
 print(f"Warmup Steps: {int(args.max_steps * args.warmup_step_ratio)}")
 print(f"Effective Batch Size: {args.grad_accumulate_steps * args.batch_size}")
 
-run_name = f"layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
+run_name = f"user_no_mask/layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
 model_folder = args.model_path.split("/")[1]
 save_folder = os.path.join(args.output_dir, model_folder, run_name)
 os.makedirs(save_folder)
@@ -252,10 +252,6 @@ for step in range(args.max_steps):
             torch.save(model.new_lm_head.state_dict(), save_path)
         else:
             pass
-            #lora_adapters = {
-            #        "A": 
-            #} 
-            #torch.save()
 
         model.eval()
         val_accum = 0.0

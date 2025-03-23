@@ -89,7 +89,7 @@ torch.set_float32_matmul_precision("high")
 model = TruncatedLlama(args.model_path, 
                        early_exit_idx=args.target_layer,
                        lm_head_random_init=args.lm_head_random_init, 
-                       use_flash_attn=True)
+                       use_flash_attn=False)
 model.new_lm_head.load_state_dict(torch.load(args.weights_to_load, map_location=args.device))
 model.eval()
 # model = torch.compile(model) if args.device == "cuda" else model
@@ -159,7 +159,7 @@ if args.report_perplexity:
     print(f"baseline llama: {baseline_llama_perp / total_tokens}, finetuned early-exit: {early_exit_ft_perp / total_tokens}, early_exit no finetuning: {early_exit_base_perp / total_tokens}")
 
 if args.sample_from_models:
-    prompt = "Hello! I'm a language model."
+    prompt = "who is obama?"
     inputs = tokenizer(prompt, return_tensors="pt")
     og_input_ids = inputs["input_ids"]
     og_input_ids = og_input_ids.to(args.device)
@@ -167,7 +167,7 @@ if args.sample_from_models:
     inputs = tokenizer(prompt, return_tensors="pt")
     actual_input_ids = inputs["input_ids"]
     actual_input_ids = actual_input_ids.to(args.device)
-
+    
     my_outputs = model.generate(actual_input_ids, 20, tokenizer.eos_token_id)
     llama_outputs = llama_model.generate(input_ids=og_input_ids, max_new_tokens=20)
 
@@ -177,3 +177,4 @@ if args.sample_from_models:
     print(my_text)
     print(" ------ ")
     print(llama_text)
+
