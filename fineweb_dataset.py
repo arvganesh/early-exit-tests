@@ -1,63 +1,103 @@
-"""
-FineWeb specific helper functions.
-"""
-
-from data_utils import custom_collate_fn
-from datasets import load_dataset
+import torch
 from torch.utils.data import DataLoader
-from langdetect import detect, LangDetectException
+from datasets import load_dataset
 
-def tokenize_fineweb_examples(example, tokenizer, max_length):
-    # Adapt this function based on the structure of the fineweb dataset
-    # Assuming the dataset has a 'text' field that contains the content
-    text = example.get("text", "")
-    if len(text) > max_length:
-        text = text[:max_length]
+def get_fineweb_dataloaders(batch_size, tokenizer, max_length, generate_labels=False, seed=42):
+    """
+    Load and prepare the 10B Fineweb dataset for training.
+    Returns train, test, val dataloaders.
+    """
+    # Load the Fineweb dataset (10B tokens version)
+    dataset = load_dataset("HuggingFaceFW/fineweb", name="sample-10BT", split="train", streaming=False)
     
-    outputs = tokenizer(text=text, padding=False)
-    return outputs
-
-def create_fineweb_train_test_val(train_size=0.8, test_size=0.1, seed=0):
-    assert train_size != 0
-    assert test_size != 0
-
-    dataset = load_dataset("HuggingFaceFW/fineweb", split="train", num_proc=4)
-    split_datasets = dataset.train_test_split(train_size=train_size, seed=seed)
-    train, non_train = split_datasets["train"], split_datasets["test"]
-
-    train_val_datasets = non_train.train_test_split(train_size=(test_size / (1 - train_size)), seed=seed)
-    test, val = train_val_datasets["train"], train_val_datasets["test"]
-    return train, test, val
-
-def get_fineweb_dataloaders(batch_size, tokenizer, max_length, train_size=0.8, test_size=0.1, val_size=0.1, seed=0, generate_labels=True, nice_shape=True):
-    assert train_size + test_size + val_size == 1.0
-    train, test, val = create_fineweb_train_test_val(train_size=train_size, test_size=test_size, seed=seed)
-
-    def tokenizer_wrapper(example):
-        return tokenize_fineweb_examples(example, tokenizer, max_length)
-
-    # Remove non english items.
-    # Adjust this depending on the structure of the fineweb dataset
-    train = train.filter(lambda x: is_english(x.get("text", "")))
-    val = val.filter(lambda x: is_english(x.get("text", "")))
-    test = test.filter(lambda x: is_english(x.get("text", "")))
+    # Shuffle and take a subset for validation and testing
+    dataset = dataset.shuffle(seed=seed)
     
-    train = train.map(tokenizer_wrapper, batched=False)
-    test = test.map(tokenizer_wrapper, batched=False)
-    val = val.map(tokenizer_wrapper, batched=False)
-
-    train.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    test.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    val.set_format(type="torch", columns=["input_ids", "attention_mask"])
-
-    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
-    test_loader = DataLoader(test, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=True, nice_shape=nice_shape))
-    val_loader = DataLoader(val, batch_size=batch_size, shuffle=True, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=True, nice_shape=nice_shape))
-    return train_loader, test_loader, val_loader
-
-def is_english(text):
-    """Return True if the detected language of the text is English."""
-    try:
-        return detect(text) == 'en'
-    except LangDetectException:
-        return False
+    # Define tokenization function
+    def tokenize_function(examples):
+        result = tokenizer(
+            examples["text"],
+            padding=False,
+            truncation=True,
+            max_length=max_length,
+            return_tensors=None,
+        )
+        
+        if generate_labels:
+            result["labels"] = result["input_ids"].copy()
+        else:
+            # For perplexity or kl_divergence loss, labels are None
+            result["labels"] = None
+            
+        return result
+    
+    # Tokenize dataset
+    tokenized_dataset = dataset.map(
+        tokenize_function,
+        remove_columns=["text", "url", "date"]
+    )
+    
+    # Create splits - for a dataset this large, we'll use streaming
+    # This creates iterators that can be used indefinitely
+    train_dataset = tokenized_dataset.take(9_800_000)  # Most for training
+    val_dataset = tokenized_dataset.skip(9_800_000).take(100_000)  # 100k for validation
+    test_dataset = tokenized_dataset.skip(9_900_000).take(100_000)  # 100k for testing
+    
+    # Create custom collate function
+    def collate_fn(batch):
+        # Process batch and handle variable lengths
+        input_ids = [item["input_ids"] for item in batch]
+        attention_mask = [item["attention_mask"] for item in batch]
+        
+        # Pad sequences
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(x) for x in input_ids], 
+            batch_first=True, 
+            padding_value=tokenizer.pad_token_id
+        )
+        
+        attention_mask = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(x) for x in attention_mask], 
+            batch_first=True, 
+            padding_value=0
+        )
+        
+        if generate_labels:
+            labels = [item["labels"] for item in batch]
+            labels = torch.nn.utils.rnn.pad_sequence(
+                [torch.tensor(x) for x in labels], 
+                batch_first=True, 
+                padding_value=-100  # Standard ignore index for CrossEntropyLoss
+            )
+        else:
+            labels = None
+            
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels
+        }
+    
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        collate_fn=collate_fn,
+        shuffle=False  # Already shuffled the dataset
+    )
+    
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        collate_fn=collate_fn,
+        shuffle=False
+    )
+    
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=batch_size, 
+        collate_fn=collate_fn,
+        shuffle=False
+    )
+    
+    return train_loader, test_loader, val_loader 

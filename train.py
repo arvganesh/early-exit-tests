@@ -20,7 +20,7 @@ from datetime import datetime
 
 from truncated_llama import TruncatedLlama
 from share_gpt_dataset import get_sharegpt_dataloaders
-
+from fineweb_dataset import get_fineweb_dataloaders
 parser = argparse.ArgumentParser(description="Train a truncated Llama model with a tuned head.")
 parser.add_argument(
     "--model_path",
@@ -171,8 +171,19 @@ model.to(args.device)
 # train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True, collate_fn=data_collator)
 # val_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=True)
 
-train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = args.loss_type == "cross_entropy", seed=args.seed)
-DATASET_DESC = "shareGPT with non-english removed"
+# train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = args.loss_type == "cross_entropy", seed=args.seed)
+# DATASET_DESC = "shareGPT with non-english removed"
+
+# Import and use the Fineweb dataloader
+# Use the fineweb dataloaders
+train, test, val = get_fineweb_dataloaders(
+    args.batch_size, 
+    tokenizer, 
+    args.max_length, 
+    generate_labels = args.loss_type == "cross_entropy", 
+    seed = args.seed
+)
+DATASET_DESC = "Fineweb 10B tokens"
 
 # Uncomment to use SlimPJ
 # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -199,7 +210,7 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="Early Exiting Llama 3.2 1B Instruct",
+        project="Early Exiting Llama 3.2 1B Instruct FineWeb",
         config=args,
         mode="online",
         notes=args.notes
