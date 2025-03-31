@@ -11,6 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments,
 from transformers import get_linear_schedule_with_warmup
 from share_gpt_dataset import get_sharegpt_dataloaders
 from data_utils import get_toy_dataloaders
+from fineweb_dataset import get_fineweb_dataloaders
 
 parser = argparse.ArgumentParser(description="Evaluate the average agreement length between baseline and tuned models.")
 parser.add_argument(
@@ -89,12 +90,32 @@ def temperature_softmax(logits, temp=1.0):
     return torch.softmax(logits, dim=-1)
 
 
-temps = [0.0, 0.2, 0.5, 1.0]
+temps = [0.0, 0.2, 1.0]
 
-base_path = "/scratch/10543/arvganesh/models/Llama-3.2-1B-Instruct/user_no_mask/"
-model_paths = [args.weights_to_load]
+scratch = "/scratch/10543/arvganesh/"
+#run_type = "only_head"
+run_type = "head_and_last"
+model_name = args.model_path.split("/")[-1]
+base_path = f"/scratch/10543/arvganesh/models/{model_name}/{run_type}/"
+models = os.listdir(base_path)
+
+def find_model_path(layer_idx):
+    for model in models:
+        if model.startswith(f"layer{layer_idx}"):
+            model_dir = os.path.join(base_path, model)
+            checkpoints = os.listdir(model_dir) 
+            checkpoint = [x for x in checkpoints if x.startswith("model_99999")][0] 
+            return str(os.path.join(model, checkpoint))
+    
+    assert False
+
+model_paths = []
+model_paths.append(find_model_path(2 * args.target_layer))     
+model_paths.append(find_model_path(2 * args.target_layer + 1))     
 
 agreement_stats_all = {}
+
+print(model_paths)
 
 # evaluate average perplexity over test dataset
 # Get data tensors, move to device.
@@ -122,12 +143,23 @@ for path in model_paths:
             if args.toy_dataset:
                 train, test, val = get_toy_dataloaders(1, tokenizer, args.max_length, generate_labels = True, nice_shape = False)
             else:
-                train, test, val = get_sharegpt_dataloaders(1, tokenizer, args.max_length, generate_labels = True, nice_shape = False)
+                #train, test, val = get_sharegpt_dataloaders(1, tokenizer, args.max_length, generate_labels = True, nice_shape = False)
+                train, test, val = get_fineweb_dataloaders(
+                    1, # batch size
+                    tokenizer,
+                    args.max_length,
+                    False, # generate labels
+                    seed = args.seed
+                )
+
             total_agreement_tok = 0
             agreement_stats = []
             print(f"Num examples: {len(val)}")
-            for idx, batch in enumerate(val):
+            for idx, batc in enumerate(val):
+                if idx >= 8000:
+                    break 
                 input_ids = batch["input_ids"]
+                input_ids = input_ids[:, :input_ids.size(1) // 2]
                 input_ids = input_ids.to(args.device)
                 agreement_length = 0
                 
@@ -195,7 +227,12 @@ for path in model_paths:
             "percentiles255075": list(percentiles)
         }
         agreement_stats_all[path] = agreement_stats_mdl
-
+    
+    
     # Write the per-layer agreement stats into a single JSON file
-    with open(f"agreement_stats_by_layer{layer_idx}_{temps[0]}.json", "w") as outfile:
+    save_dir = os.path.join(scratch, f"evaluation/{run_type}/")
+    run_type = "head_and_lastu
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"agreement_stats_by_layer{layer_idx}_{temps[0]}.json")
+    with open(save_path, "w") as outfile:
         json.dump(agreement_stats_all, outfile, indent=4)

@@ -210,7 +210,7 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="Early Exiting Llama 3.2 1B Instruct FineWeb",
+        project="Early Exiting Llama 3.2 1B FineWeb",
         config=args,
         mode="online",
         notes=args.notes
@@ -233,7 +233,7 @@ print(f"Max Steps: {args.max_steps}")
 print(f"Warmup Steps: {int(args.max_steps * args.warmup_step_ratio)}")
 print(f"Effective Batch Size: {args.grad_accumulate_steps * args.batch_size}")
 
-run_name = f"user_no_mask/layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
+run_name = f"only_head/layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
 model_folder = args.model_path.split("/")[1]
 save_folder = os.path.join(args.output_dir, model_folder, run_name)
 os.makedirs(save_folder)
