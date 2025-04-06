@@ -5,6 +5,33 @@ from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoToken
 from transformers.modeling_outputs import MaskedLMOutput
 from typing import List, Tuple
 
+def masked_kl_loss(logits_log_prob, og_log_prob, kl_loss_mask, reduction='batchmean'):
+    # Apply loss mask (attention mask => B, T)
+    # Define a KLDivLoss function without reduction to get elementwise losses.
+    kl_loss_fct = torch.nn.KLDivLoss(reduction='none', log_target=True)
+
+    # Compute the per-element loss (B, T, V)
+    loss_tensor = kl_loss_fct(logits_log_prob, og_log_prob)
+
+    # Sum over the vocabulary dimension to get a per-token loss (B, T)
+    loss_per_token = loss_tensor.sum(dim=-1)
+
+    # Apply the attention mask.
+    # (Convert the mask to float so that 0's zero out the loss and 1's leave it unchanged.)
+    mask = kl_loss_mask.float()
+    masked_loss = loss_per_token * mask
+
+    # Normalize by batch size (B) to match "batchmean" behavior.
+    if reduction == 'batchmean':
+        batch_size = logits_log_prob.size(0)
+        loss = masked_loss.sum() / batch_size
+    elif reduction == 'mean':
+        loss = masked_loss.mean()
+    else:
+        raise Exception("Invalid reduction type.")
+
+    return loss
+
 class TruncatedLlama(nn.Module):
     def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False, use_lora = False, ft_last_transformer = False):
         super().__init__()
@@ -26,9 +53,9 @@ class TruncatedLlama(nn.Module):
         def save_activations(module, input, output):
             self.early_exit_activations = output[0]
 
-        early_exit_layer = self.headless_model.layers[early_exit_idx]
-        early_exit_layer.register_forward_hook(save_activations)
-        print(early_exit_layer)
+        self.early_exit_layer = self.headless_model.layers[early_exit_idx]
+        self.early_exit_layer.register_forward_hook(save_activations)
+        print(self.early_exit_layer)
 
         # Optionally, randomly initialize the early-exiting LM head.
         self.new_lm_head = nn.Linear(self.og_lm_head.in_features, self.og_lm_head.out_features, bias=False)
@@ -39,8 +66,8 @@ class TruncatedLlama(nn.Module):
             for param in self.new_lm_head.parameters():
                 param.requires_grad = True
         if ft_last_transformer:
-            for param in early_exit_layer.parameters():
-                param.required_grad = True
+            for param in self.early_exit_layer.parameters():
+                param.requires_grad = True
 
         
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None, keep_og_logits=False):
@@ -56,12 +83,14 @@ class TruncatedLlama(nn.Module):
             assert labels is not None
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         elif loss_type == "kl_divergence":
-            og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
-            og_log_prob = F.log_softmax(og_lm_logits, dim=-1)
+            with torch.no_grad():
+                og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
+                og_log_prob = F.log_softmax(og_lm_logits, dim=-1)
             logits_log_prob = F.log_softmax(logits, dim=-1)
-            # batchmean = KL divergence over batch
-            kl_loss = nn.KLDivLoss(log_target=True, reduction="batchmean")
-            loss = kl_loss(logits_log_prob, og_log_prob)
+            loss = masked_kl_loss(logits_log_prob, og_log_prob, attention_mask, reduction='mean') 
+            # fake_attn_mask = torch.ones(attention_mask.shape)
+            # fake_attn_mask = fake_attn_mask.to("cuda")
+            # wrong_loss = masked_kl_loss(logits_log_prob, og_log_prob, fake_attn_mask, reduction='mean') 
 
         if keep_og_logits and loss_type != "kl_divergence":
             og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
@@ -71,6 +100,12 @@ class TruncatedLlama(nn.Module):
             "logits": logits,
             "og_lm_logits": og_lm_logits if keep_og_logits else None,
         }
+    
+    def load_from_checkpoint(self, lm_head, last_transformer):
+        if lm_head:
+            self.new_lm_head.load_state_dict(lm_head)
+        if last_transformer:
+            self.early_exit_layer.load_state_dict(last_transformer)
     
     def configure_optimizers(self, weight_decay, learning_rate, device_type):
         # start with all of the candidate parameters (that require grad)

@@ -214,7 +214,7 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="Early Exiting Llama 3.2 1B FineWeb, phase 2",
+        project="Early Exiting Llama 3.2 1B FineWeb, phase 3",
         config=args,
         mode="online",
         notes=args.notes
@@ -247,15 +247,17 @@ non_pad_tok = 0
 total_tok = 0
 num_examples = 0
 num_train_batches = len(train)
+train_iter = iter(train)
 for step in range(args.max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
     for mini_step in range(args.grad_accumulate_steps):
-        next_batch = next(iter(train))
+        next_batch = next(train_iter)
         input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
         input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+
         # track data stats
-        non_pad_tok = attention_mask.sum()
+        non_pad_tok += attention_mask.sum()
         attn_mask_shape = torch.tensor(attention_mask.size())
         total_tok += int(torch.prod(attn_mask_shape))
         num_examples += args.batch_size
@@ -266,11 +268,11 @@ for step in range(args.max_steps):
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
 
         loss, logits = outputs["loss"], outputs["logits"]
-        loss = loss / args.grad_accumulate_steps # sum / batch_size / grad_accumulate_steps = sum / (batch_size * grad_accumulate_steps)
+        print(f"Step {step}.{mini_step}, Train Loss: {loss}")
         loss_accum += loss.detach()
         loss.backward()
-
-    if step % 10000 == 0 or step == args.max_steps - 1 or step == 0:
+    
+    if step % 10000 == 0 or step == args.max_steps - 1:
         save_path = os.path.join(save_folder, f"model_{step}_{loss_accum:.2f}.pt")
         
         if not args.use_lora:
@@ -285,8 +287,9 @@ for step in range(args.max_steps):
         model.eval()
         val_accum = 0.0
         with torch.no_grad():
+            print("Evaluating on validation set", len(val))
             for batch_idx, batch in enumerate(val):
-                if batch_idx >= 100:
+                if batch_idx > 500:
                     break
                 input_ids, attention_mask, labels = batch["input_ids"],  batch["attention_mask"], batch["labels"]
                 input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
