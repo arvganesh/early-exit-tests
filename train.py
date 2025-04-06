@@ -29,6 +29,11 @@ parser.add_argument(
     help="Path to the model checkpoint or model identifier."
 )
 parser.add_argument(
+    "--run_type",
+    type=str,
+    help="Path to the model checkpoint or model identifier."
+)
+parser.add_argument(
     "--target_layer",
     type=int,
     default=16,
@@ -161,7 +166,6 @@ if args.use_lora:
 
 model.print_trainable_parameters()
 model.train()
-# model = torch.compile(model) if args.device == "cuda" else model
 model.to(args.device)
 ## Training Loop
 
@@ -210,7 +214,7 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="Early Exiting Llama 3.2 1B FineWeb",
+        project="Early Exiting Llama 3.2 1B FineWeb, phase 2",
         config=args,
         mode="online",
         notes=args.notes
@@ -233,12 +237,16 @@ print(f"Max Steps: {args.max_steps}")
 print(f"Warmup Steps: {int(args.max_steps * args.warmup_step_ratio)}")
 print(f"Effective Batch Size: {args.grad_accumulate_steps * args.batch_size}")
 
-run_name = f"only_head/layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
+run_name = f"{args.run_type}/layer{args.target_layer}_{args.max_steps}steps_begin{int(time.time())}"
 model_folder = args.model_path.split("/")[1]
 save_folder = os.path.join(args.output_dir, model_folder, run_name)
 os.makedirs(save_folder)
 
 gradients = {}
+non_pad_tok = 0
+total_tok = 0
+num_examples = 0
+num_train_batches = len(train)
 for step in range(args.max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
@@ -246,6 +254,12 @@ for step in range(args.max_steps):
         next_batch = next(iter(train))
         input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
         input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+        # track data stats
+        non_pad_tok = attention_mask.sum()
+        attn_mask_shape = torch.tensor(attention_mask.size())
+        total_tok += int(torch.prod(attn_mask_shape))
+        num_examples += args.batch_size
+
         if args.loss_type == "cross_entropy":
             labels = labels.to(args.device)
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
@@ -256,11 +270,15 @@ for step in range(args.max_steps):
         loss_accum += loss.detach()
         loss.backward()
 
-    if step % 1000 == 0 or step == args.max_steps - 1 or step == 0:
+    if step % 10000 == 0 or step == args.max_steps - 1 or step == 0:
         save_path = os.path.join(save_folder, f"model_{step}_{loss_accum:.2f}.pt")
         
         if not args.use_lora:
-            torch.save(model.new_lm_head.state_dict(), save_path)
+            d = {
+                "lm_head": model.new_lm_head.state_dict(),
+                "last_transformer": model.headless_model.layers[args.target_layer].state_dict() if args.ft_last_transformer else None
+            }
+            torch.save(d, save_path)
         else:
             pass
 
@@ -283,6 +301,7 @@ for step in range(args.max_steps):
         print(f"Validation Loss: {val_accum}")
         if args.wandb:
             wandb.log({"val/loss": val_accum}, step=step)
+            wandb.log({"data/ratio": non_pad_tok / total_tok}, step=step)
 
             for name, param in model.named_parameters():
                 if param.grad is not None:
@@ -307,36 +326,8 @@ for step in range(args.max_steps):
 if args.wandb:
     wandb.finish()
 
-# Run model on validation data every 50 steps.
-# if step % 500 == 0 or step == 0:
-#     model.eval()
-#     val_accum = 0.0
-#     with torch.no_grad():
-#         for batch_idx, batch in enumerate(val_loader):
-#             if batch_idx >= 10:
-#                 break
-#             input_ids, labels = batch["input_ids"], batch["labels"]
-#             input_ids, labels = input_ids.to(args.device), labels.to(args.device)
-#             with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-#                 outputs = model(input_ids, labels=labels)
-#             val_loss = outputs.loss
-#             val_loss /= grad_accumulate_steps
-#             val_accum += val_loss.detach()
-#     model.train()
-#     print(f"Validation Loss: {val_accum}")
-#     if args.wandb:
-#         wandb.log({"val/loss": val_accum})
+print(f"non_pad: {non_pad_tok}, total_tokens: {total_tok}, #examples: {num_examples}, train_size: {num_train_batches * 4}")
 
-# save optimizer state
-# if step % 1000 == 0 or step == max_steps - 1:
-#     optimizer_state = optimizer.state_dict()
-#     trained_params = model.model.lm_head.state_dict()
-#     torch.save({
-#         "optimizer_state": optimizer_state,
-#         "trained_params": trained_params,
-#         "step": step,
-#         # "val_loss": val_accum
-#     }, f"./models/xsum1/llama-trunc-{step}step")
 # Generate from model every 100 steps.
 # .generate() uses autocast.
 # if step % 100 == 0 or step == max_steps - 1:

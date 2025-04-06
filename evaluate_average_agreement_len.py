@@ -51,6 +51,11 @@ parser.add_argument(
     help="Name of back-end device to use for PyTorch."
 )
 parser.add_argument(
+    "--run_type",
+    type=str,
+    help=""
+)
+parser.add_argument(
     "--sample_from_models",
     action="store_true",
     help="Sample from baseline and experimental models and print the results."
@@ -89,14 +94,13 @@ def temperature_softmax(logits, temp=1.0):
     logits /= temp
     return torch.softmax(logits, dim=-1)
 
-
-temps = [0.0, 0.2, 1.0]
+#temps = [0.0, 0.2, 1.0]
+temps = [args.softmax_temperature]
 
 scratch = "/scratch/10543/arvganesh/"
 #run_type = "only_head"
-run_type = "head_and_last"
 model_name = args.model_path.split("/")[-1]
-base_path = f"/scratch/10543/arvganesh/models/{model_name}/{run_type}/"
+base_path = f"/scratch/10543/arvganesh/models/{model_name}/{args.run_type}/"
 models = os.listdir(base_path)
 
 def find_model_path(layer_idx):
@@ -104,14 +108,15 @@ def find_model_path(layer_idx):
         if model.startswith(f"layer{layer_idx}"):
             model_dir = os.path.join(base_path, model)
             checkpoints = os.listdir(model_dir) 
-            checkpoint = [x for x in checkpoints if x.startswith("model_99999")][0] 
+            checkpoint = [x for x in checkpoints if x.startswith("model_80000")][0] 
             return str(os.path.join(model, checkpoint))
     
     assert False
 
 model_paths = []
-model_paths.append(find_model_path(2 * args.target_layer))     
-model_paths.append(find_model_path(2 * args.target_layer + 1))     
+#model_paths.append(find_model_path(2 * args.target_layer))     
+#model_paths.append(find_model_path(2 * args.target_layer + 1))     
+model_paths.append(find_model_path(args.target_layer))
 
 agreement_stats_all = {}
 
@@ -121,6 +126,7 @@ print(model_paths)
 # Get data tensors, move to device.
 for path in model_paths:
     print(f"Evaluating {path}")
+    # path: layerX_Ysteps_beginTIMESTAMP/model_NSTEPS_loss.pt
     folder_name = path.split("/")[0]
     layer_name = folder_name.split("_")[0]
     layer_idx = int(layer_name[len("layer"):])
@@ -128,7 +134,11 @@ for path in model_paths:
                            early_exit_idx=layer_idx,
                        lm_head_random_init=False,
                        use_flash_attn=args.flash_attn)
-    model.new_lm_head.load_state_dict(torch.load(os.path.join(base_path, path), map_location=args.device))
+    model_dict = torch.load(os.path.join(base_path, path), map_location=args.device)
+    model.new_lm_head.load_state_dict(model_dict["lm_head"])
+    if model_dict["last_transformer"]:
+        print("loading last transformer layer!")
+        model.headless_model.layers[layer_idx].load_state_dict(model_dict["last_transformer"])
     model.eval()
     model.to(args.device)
     
@@ -155,8 +165,9 @@ for path in model_paths:
             total_agreement_tok = 0
             agreement_stats = []
             print(f"Num examples: {len(val)}")
-            for idx, batc in enumerate(val):
-                if idx >= 8000:
+            num_samples = 5000
+            for idx, batch in enumerate(val):
+                if idx >= num_samples:
                     break 
                 input_ids = batch["input_ids"]
                 input_ids = input_ids[:, :input_ids.size(1) // 2]
@@ -210,13 +221,13 @@ for path in model_paths:
                 agreement_stats.append(agreement_length)
                 total_agreement_tok += agreement_length 
         
-        avg_agreement = total_agreement_tok / len(val)
+        avg_agreement = total_agreement_tok / num_samples
         min_agreement = min(agreement_stats)
         max_agreement = max(agreement_stats)
         median_agreement = statistics.median(agreement_stats)
         std_agreement = statistics.stdev(agreement_stats) if len(agreement_stats) > 1 else 0.0
         percentiles = np.percentile(agreement_stats, [25, 50, 75])
-        print(f"Average agreement length: {total_agreement_tok / len(val):.5f}")
+        print(f"Average agreement length: {total_agreement_tok / num_samples:.5f}")
         agreement_stats_mdl[temp] = {
             "data": agreement_stats,
             "avg_agreement": avg_agreement,
@@ -230,8 +241,7 @@ for path in model_paths:
     
     
     # Write the per-layer agreement stats into a single JSON file
-    save_dir = os.path.join(scratch, f"evaluation/{run_type}/")
-    run_type = "head_and_lastu
+    save_dir = os.path.join(scratch, f"evaluation/{args.run_type}/")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, f"agreement_stats_by_layer{layer_idx}_{temps[0]}.json")
     with open(save_path, "w") as outfile:

@@ -25,7 +25,10 @@ class TruncatedLlama(nn.Module):
         self.early_exit_activations = None
         def save_activations(module, input, output):
             self.early_exit_activations = output[0]
-        self.headless_model.layers[early_exit_idx].register_forward_hook(save_activations)
+
+        early_exit_layer = self.headless_model.layers[early_exit_idx]
+        early_exit_layer.register_forward_hook(save_activations)
+        print(early_exit_layer)
 
         # Optionally, randomly initialize the early-exiting LM head.
         self.new_lm_head = nn.Linear(self.og_lm_head.in_features, self.og_lm_head.out_features, bias=False)
@@ -35,9 +38,9 @@ class TruncatedLlama(nn.Module):
         if not use_lora:
             for param in self.new_lm_head.parameters():
                 param.requires_grad = True
-            if ft_last_transformer:
-                for param in self.headless_model.layers[early_exit_idx].parameters():
-                    param.required_grad = True
+        if ft_last_transformer:
+            for param in early_exit_layer.parameters():
+                param.required_grad = True
 
         
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None, keep_og_logits=False):
@@ -56,6 +59,7 @@ class TruncatedLlama(nn.Module):
             og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
             og_log_prob = F.log_softmax(og_lm_logits, dim=-1)
             logits_log_prob = F.log_softmax(logits, dim=-1)
+            # batchmean = KL divergence over batch
             kl_loss = nn.KLDivLoss(log_target=True, reduction="batchmean")
             loss = kl_loss(logits_log_prob, og_log_prob)
 
