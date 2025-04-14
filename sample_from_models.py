@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser(description="Train a truncated Llama model with
 parser.add_argument(
     "--model_path",
     type=str,
-    default="meta-llama/Llama-2-7b-chat-hf",
+    default="meta-llama/Llama-3.2-1B",
     help="Path to the model checkpoint or model identifier."
 )
 parser.add_argument(

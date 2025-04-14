@@ -16,6 +16,7 @@ SEED = 0
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
+torch.use_deterministic_algorithms(True)
 
 def test_same_output_with_last_layer_exit():
     model_path = "meta-llama/llama-3.2-1B"
@@ -41,6 +42,39 @@ def test_same_output_with_last_layer_exit():
     assert truth_logits.shape == actual_logits.shape
     assert (truth_logits == actual_logits).all()
     assert test_loss == 0
+
+def test_output_same_for_ft_last_transformer():
+    model_path = "meta-llama/llama-3.2-1B"
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    truth_model = AutoModelForCausalLM.from_pretrained(model_path)
+    test_model = TruncatedLlama(model_path,
+                                early_exit_idx=15,
+                                lm_head_random_init=False,
+                                use_flash_attn=False,
+                                ft_last_transformer=False,
+                                ft_head=False)
+
+    # Set Q_proj to all zeroes to mess up the output of the early exit layer.
+    # Assert that the model's calculation of llama's original logits remain correct.
+    # zeros = torch.zeros(test_model.early_exit_layer.state_dict()["self_attn.q_proj.weight"].shape)
+    # test_model.early_exit_layer.load_state_dict({"self_attn.q_proj.weight": zeros}, strict=False) 
+    truth_model = AutoModelForCausalLM.from_pretrained(model_path)
+                                
+    prompt = "Hello!"
+    inputs = tokenizer(prompt, return_tensors="pt")
+    fake_inputs = tokenizer(prompt, return_tensors="pt")
+
+    print(inputs["input_ids"])
+    print(fake_inputs["input_ids"])
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        truth_outputs = truth_model(inputs["input_ids"])
+        test_outputs = test_model(fake_inputs["input_ids"], loss_type="kl_divergence", keep_og_logits=True)
+
+    truth_logits, og_logits = truth_outputs["logits"], test_outputs["og_lm_logits"]
+    assert (truth_logits == og_logits).all()
+    assert not (truth_logits == test_outputs["logits"]).all()
 
 def test_hidden_states_match_on_early_exit():
     model_path = "meta-llama/llama-3.2-1B"
@@ -107,3 +141,6 @@ def test_toy_dataloader():
     train_batch = next(iter(train))
     input_ids = train_batch["input_ids"]
     assert input_ids.size(0) == batch_size
+
+if __name__ == "__main__":
+    test_output_same_for_ft_last_transformer()

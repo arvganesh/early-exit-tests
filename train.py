@@ -140,6 +140,17 @@ parser.add_argument(
     action="store_true",
     help="finetune last transformer layer"
 )
+parser.add_argument(
+    "--ft_head",
+    action="store_true",
+    help="finetune the head"
+)
+parser.add_argument(
+    "--checkpoint_path",
+    default=None,
+    type=str,
+    help="Path to the checkpoint to load."
+)
 args = parser.parse_args()
 print(args)
 
@@ -157,8 +168,14 @@ model = TruncatedLlama(args.model_path,
                        early_exit_idx=args.target_layer,
                        lm_head_random_init=args.lm_head_random_init, 
                        use_flash_attn=False,
-                       use_lora=args.use_lora,
+                       ft_head=args.ft_head,
                        ft_last_transformer=args.ft_last_transformer)
+
+if args.checkpoint_path is not None:
+    checkpoint = torch.load(args.checkpoint_path)
+    if args.ft_last_transformer:
+        assert checkpoint["last_transformer"] is None
+        model.load_from_checkpoint(checkpoint["lm_head"], None)
 
 if args.use_lora:
     cfg = LoraConfig(r = args.lora_r, lora_alpha = args.lora_alpha, use_rslora = args.use_rslora, target_modules = ["new_lm_head"], lora_dropout = 0.1, bias="none")
@@ -214,7 +231,7 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="Early Exiting Llama 3.2 1B FineWeb, phase 3",
+        project="Early Exiting Llama 3.2 1B FineWeb, phase 4",
         config=args,
         mode="online",
         notes=args.notes
@@ -268,7 +285,6 @@ for step in range(args.max_steps):
             outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
 
         loss, logits = outputs["loss"], outputs["logits"]
-        print(f"Step {step}.{mini_step}, Train Loss: {loss}")
         loss_accum += loss.detach()
         loss.backward()
     
@@ -277,8 +293,8 @@ for step in range(args.max_steps):
         
         if not args.use_lora:
             d = {
-                "lm_head": model.new_lm_head.state_dict(),
-                "last_transformer": model.headless_model.layers[args.target_layer].state_dict() if args.ft_last_transformer else None
+                "lm_head": model.truncated_model.lm_head.state_dict(),
+                "last_transformer": model.truncated_model.model.layers[args.target_layer].state_dict() if args.ft_last_transformer else None
             }
             torch.save(d, save_path)
         else:

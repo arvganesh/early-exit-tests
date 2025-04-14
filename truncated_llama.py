@@ -18,8 +18,11 @@ def masked_kl_loss(logits_log_prob, og_log_prob, kl_loss_mask, reduction='batchm
 
     # Apply the attention mask.
     # (Convert the mask to float so that 0's zero out the loss and 1's leave it unchanged.)
-    mask = kl_loss_mask.float()
-    masked_loss = loss_per_token * mask
+    if kl_loss_mask is not None:
+        mask = kl_loss_mask.float()
+        masked_loss = loss_per_token * mask
+    else:
+        masked_loss = loss_per_token
 
     # Normalize by batch size (B) to match "batchmean" behavior.
     if reduction == 'batchmean':
@@ -33,77 +36,79 @@ def masked_kl_loss(logits_log_prob, og_log_prob, kl_loss_mask, reduction='batchm
     return loss
 
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, early_exit_idx: int, lm_head_random_init: bool = True, use_flash_attn: bool = False, use_lora = False, ft_last_transformer = False):
+    def __init__(self, model_path: str, early_exit_idx: int, use_flash_attn: bool = False, ft_last_transformer = False, ft_head = False, lm_head_random_init = True):
         super().__init__()
+        # Load reference model (always kept frozen)
         if use_flash_attn:
-            model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
+            self.reference_model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
         else:
-            model = LlamaForCausalLM.from_pretrained(model_path)
+            self.reference_model = LlamaForCausalLM.from_pretrained(model_path)
 
-        # Freeze all parameters
-        for param in model.parameters():
+        # Freeze reference model
+        for param in self.reference_model.parameters():
             param.requires_grad = False
-
-        # Break up model
-        self.headless_model = model.model
-        self.og_lm_head = model.lm_head
-
-        # Register hook to save early exit activations
-        self.early_exit_activations = None
-        def save_activations(module, input, output):
-            self.early_exit_activations = output[0]
-
-        self.early_exit_layer = self.headless_model.layers[early_exit_idx]
-        self.early_exit_layer.register_forward_hook(save_activations)
-        print(self.early_exit_layer)
-
-        # Optionally, randomly initialize the early-exiting LM head.
-        self.new_lm_head = nn.Linear(self.og_lm_head.in_features, self.og_lm_head.out_features, bias=False)
-        if not lm_head_random_init:
-            self.new_lm_head.load_state_dict(self.og_lm_head.state_dict())
-
-        if not use_lora:
-            for param in self.new_lm_head.parameters():
-                param.requires_grad = True
+            
+        # Load truncated model (for early exit)
+        if use_flash_attn:
+            self.truncated_model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
+        else:
+            self.truncated_model = LlamaForCausalLM.from_pretrained(model_path)
+            
+        # Freeze all parameters in truncated model by default
+        for param in self.truncated_model.parameters():
+            param.requires_grad = False
+            
+        # We'll only keep layers up to early_exit_idx in the truncated model
+        self.early_exit_idx = early_exit_idx
+        
+        # Actually truncate the model by keeping only layers up to early_exit_idx
+        # Store a reference to the last layer for potential fine-tuning
+        self.early_exit_layer = self.truncated_model.model.layers[early_exit_idx]
+        
+        # Truncate the layers list to only include layers up to early_exit_idx (inclusive)
+        self.truncated_model.model.layers = self.truncated_model.model.layers[:early_exit_idx + 1]
+        
+        # If requested, make the last transformer layer trainable
         if ft_last_transformer:
             for param in self.early_exit_layer.parameters():
                 param.requires_grad = True
-
+            print(f"Enabled fine-tuning for the last transformer layer (idx: {early_exit_idx})")
+        
+        if ft_head:
+            for param in self.truncated_model.lm_head.parameters():
+                param.requires_grad = True
         
     def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None, keep_og_logits=False):
-        # Apply RMSNorm to early exit activations (embeddings already applied).
-        final_layer_activations = self.headless_model(input_ids, attention_mask=attention_mask)
-        assert self.early_exit_activations != None
-        self.early_exit_activations = self.headless_model.norm(self.early_exit_activations)
-        logits = self.new_lm_head(self.early_exit_activations)
-
-        loss = None
+        # Process with reference model when needed
         og_lm_logits = None
+        if loss_type == "kl_divergence" or keep_og_logits:
+            with torch.no_grad():
+                ref_outputs = self.reference_model(input_ids, attention_mask=attention_mask)
+                og_lm_logits = ref_outputs.logits
+        
+        # Process with truncated model for early exit
+        # Since we've actually truncated the model's layers, we can use the model directly
+        logits = self.truncated_model(input_ids, attention_mask=attention_mask).logits
+        
+        # Calculate loss if needed
+        loss = None
         if loss_type == "cross_entropy":
             assert labels is not None
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         elif loss_type == "kl_divergence":
-            with torch.no_grad():
-                og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
-                og_log_prob = F.log_softmax(og_lm_logits, dim=-1)
             logits_log_prob = F.log_softmax(logits, dim=-1)
-            loss = masked_kl_loss(logits_log_prob, og_log_prob, attention_mask, reduction='mean') 
-            # fake_attn_mask = torch.ones(attention_mask.shape)
-            # fake_attn_mask = fake_attn_mask.to("cuda")
-            # wrong_loss = masked_kl_loss(logits_log_prob, og_log_prob, fake_attn_mask, reduction='mean') 
-
-        if keep_og_logits and loss_type != "kl_divergence":
-            og_lm_logits = self.og_lm_head(final_layer_activations.last_hidden_state)
+            og_log_prob = F.log_softmax(og_lm_logits, dim=-1)
+            loss = masked_kl_loss(logits_log_prob, og_log_prob, attention_mask, reduction='mean')
 
         return {
             "loss": loss,
             "logits": logits,
-            "og_lm_logits": og_lm_logits if keep_og_logits else None,
+            "og_lm_logits": og_lm_logits if (keep_og_logits or loss_type == "kl_divergence") else None,
         }
     
     def load_from_checkpoint(self, lm_head, last_transformer):
         if lm_head:
-            self.new_lm_head.load_state_dict(lm_head)
+            self.truncated_model.lm_head.load_state_dict(lm_head)
         if last_transformer:
             self.early_exit_layer.load_state_dict(last_transformer)
     
@@ -146,4 +151,3 @@ class TruncatedLlama(nn.Module):
         total = sum(p.numel() for p in self.parameters())
         print(f"Number of trainable parameters in the model: {num_trainable} | {num_trainable * 100 / total:.3f}")
         print(f"Number of parameters in the model: {total}")
-
