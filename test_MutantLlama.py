@@ -23,8 +23,9 @@ def test_mutant_llama():
 
     # Test the model
     test_input = torch.randint(0, 128_256, (1, 10)).to(device)
-    test_output = model(test_input)
-    true_output = hf_model(test_input)
+    attention_mask = torch.ones_like(test_input).to(device)
+    test_output = model(test_input, attention_mask=attention_mask)
+    true_output = hf_model(test_input, attention_mask=attention_mask)
 
     # Check if the output is the same
     assert torch.allclose(test_output, true_output)
@@ -42,8 +43,9 @@ def test_mutant_llama_with_ee_config():
 
     # Test the model
     test_input = torch.randint(0, 128_256, (1, 10)).to(device)
-    test_output = model(test_input)
-    true_output = hf_model(test_input)
+    attention_mask = torch.ones_like(test_input).to(device)
+    test_output = model(test_input, attention_mask=attention_mask)
+    true_output = hf_model(test_input, attention_mask=attention_mask)
 
     # Check if the output is the same
     assert torch.allclose(test_output["llama_logits"], true_output["logits"])
