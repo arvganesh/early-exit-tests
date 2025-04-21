@@ -1,12 +1,9 @@
 import torch.nn as nn
+import torch
 import contextlib
 import collections
 import math
 from transformers import AutoModelForCausalLM
-
-torch.set_float32_matmul_precision('high')
-torch.manual_seed(42)
-torch.use_deterministic_algorithms(True)
 
 LLAMA32_CONFIG_1B = {
     # High level input parameters
@@ -41,6 +38,21 @@ LLAMA32_CONFIG_1B = {
     "rope_theta": 500000.0,
 }
 
+def robust_copy_weights(custom_model, hf_model):
+    custom_state = dict(custom_model.named_parameters())
+    hf_state = dict(hf_model.named_parameters())
+    for name, param in custom_state.items():
+        if name in hf_state:
+            if param.shape == hf_state[name].shape:
+                param.data.copy_(hf_state[name].data)
+            else:
+                print(f"Shape mismatch for {name}: custom {param.shape}, HF {hf_state[name].shape}")
+        else:
+            print(f"Parameter {name} missing in HF model")
+    for name in hf_state:
+        if name not in custom_state:
+            print(f"Parameter {name} missing in custom model")
+
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
         super().__init__()
@@ -59,9 +71,22 @@ class RMSNorm(nn.Module):
         # Scale and return.
         return self.weight.to(input_dtype) * x.to(input_dtype)
 
+class EarlyExitConfig:
+    def __init__(self, cfg, layer_idx: int, train_transformer: bool = True):
+        self.layer_idx = layer_idx
+        self.norm = RMSNorm(cfg["hidden_size"], eps=cfg["rms_norm_eps"])
+        if train_transformer:
+            self.last_decoder_layer = LlamaDecoderLayer(cfg, layer_idx)
+        self.lm_head = nn.Linear(cfg["hidden_size"], cfg["vocab_size"], bias=False)
+
+    def load_lm_head(self, lm_head):
+        self.lm_head.weight = lm_head.weight
+
+    def load_last_decoder_layer(self, last_decoder_layer):
+        self.last_decoder_layer.load_state_dict(last_decoder_layer.state_dict())
 
 class Llama3Model(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg, ee_cfg: EarlyExitConfig = None):
         super().__init__()
         self.padding_idx = cfg["pad_token_id"]
         self.vocab_size = cfg["vocab_size"]
@@ -74,6 +99,9 @@ class Llama3Model(nn.Module):
 
         self.norm = RMSNorm(cfg["hidden_size"], eps=cfg["rms_norm_eps"])
         self.rotary_emb = LlamaRotaryEmbedding(cfg) 
+
+        # Early Exit Modules
+        self.ee_cfg = ee_cfg
 
     def forward(self, 
         in_idx: torch.LongTensor,
@@ -93,10 +121,29 @@ class Llama3Model(nn.Module):
         # Iterate through transformer layers
         hidden_states = tok_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        for decoder_layer in self.layers:
-            hidden_states = decoder_layer(hidden_states, attention_mask=causal_mask, position_embeddings=position_embeddings)
-        hidden_states = self.norm(hidden_states)
-        return hidden_states # <-- Return the hidden states, not logits
+
+        # Prefix Llama
+        for i in range(self.ee_cfg.layer_idx):
+            decoder_layer = self.layers[i]
+            hidden_states = decoder_layer(hidden_states, attention_mask=causal_mask, position_embeddings=position_embeddings) 
+
+        # Use frozen decoder layer or my decoder layer depending on the config
+        if self.ee_cfg and self.ee_cfg.train_transformer:
+            next_decoder_layer = self.ee_cfg.last_decoder_layer
+        else:
+            next_decoder_layer = self.layers[self.ee_cfg.layer_idx]
+        
+        hidden_states = next_decoder_layer(hidden_states, attention_mask=causal_mask, position_embeddings=position_embeddings)
+        ee_hidden_states = self.ee_cfg.norm(hidden_states)
+
+        # Post-early exit layers
+        with torch.no_grad():
+            for i in range(self.ee_cfg.layer_idx + 1, len(self.layers)):
+                decoder_layer = self.layers[i]
+                hidden_states = decoder_layer(hidden_states, attention_mask=causal_mask, position_embeddings=position_embeddings) 
+            hidden_states = self.norm(hidden_states)
+
+        return ee_hidden_states, hidden_states # <-- Return the hidden states, not logits
 
     def _update_causal_mask(self, attention_mask, tok_embeds):
         dtype, device = tok_embeds.dtype, tok_embeds.device
@@ -467,19 +514,28 @@ def generate(model, idx, max_new_tokens, context_size, temperature=0.0, top_k=No
 
     return idx
 
-class Llama3ForCausalLM(nn.Module):
-    def __init__(self, cfg):
+class MutantLlama(nn.Module):
+    def __init__(self, cfg, ee_cfg: EarlyExitConfig = None):
         super().__init__()
-        self.model = Llama3Model(cfg)
+        self.model = Llama3Model(cfg, ee_cfg=ee_cfg)
         self.lm_head = nn.Linear(cfg["hidden_size"], cfg["vocab_size"], bias=False)
+        self.ee_cfg = ee_cfg
         
         # Weight tying.
         self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(self, in_idx, attention_mask):
-        x = self.model(in_idx, attention_mask)
-        logits = self.lm_head(x)
-        return logits
+        ee_hidden_states, hidden_states = self.model(in_idx, attention_mask)
+        ee_logits = self.ee_cfg.lm_head(ee_hidden_states)
+
+        # Post-early exit layers    
+        with torch.no_grad():
+            logits = self.lm_head(hidden_states)
+
+        return {"llama_logits": logits, "ee_logits": ee_logits}
+    
+    def load_from_hf(self, hf_model):
+        robust_copy_weights(self, hf_model)
 
 def compare_models(custom_model, hf_model, input_ids=None, attention_mask=None, verbose=True, atol=1e-4):
     """
@@ -526,24 +582,9 @@ def compare_models(custom_model, hf_model, input_ids=None, attention_mask=None, 
             print(f"Output diff at index {idx}: custom={custom_out[idx]}, hf={hf_out[idx]}")
     print("=== Comparison complete ===")
 
-def robust_copy_weights(custom_model, hf_model):
-    custom_state = dict(custom_model.named_parameters())
-    hf_state = dict(hf_model.named_parameters())
-    for name, param in custom_state.items():
-        if name in hf_state:
-            if param.shape == hf_state[name].shape:
-                param.data.copy_(hf_state[name].data)
-            else:
-                print(f"Shape mismatch for {name}: custom {param.shape}, HF {hf_state[name].shape}")
-        else:
-            print(f"Parameter {name} missing in HF model")
-    for name in hf_state:
-        if name not in custom_state:
-            print(f"Parameter {name} missing in custom model")
-
 # Usage example:
 if __name__ == "__main__":
-    model = Llama3ForCausalLM(LLAMA32_CONFIG_1B)  # <-- Use the wrapper class
+    model = MutantLlama(LLAMA32_CONFIG_1B)  # <-- Use the wrapper class
     
     # # Load HF implementation (requires transformers installed)
     # print("Loading HuggingFace model...")
