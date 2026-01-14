@@ -22,13 +22,6 @@ def get_fineweb_dataloaders(batch_size, tokenizer, max_length, generate_labels=F
             max_length=max_length,
             return_tensors=None,
         )
-        
-        if generate_labels:
-            result["labels"] = result["input_ids"].copy()
-        else:
-            # For perplexity or kl_divergence loss, labels are None
-            result["labels"] = None
-            
         return result
     
     # Tokenize dataset
@@ -62,15 +55,14 @@ def get_fineweb_dataloaders(batch_size, tokenizer, max_length, generate_labels=F
             padding_value=0
         )
         
+        labels = None
         if generate_labels:
-            labels = [item["labels"] for item in batch]
-            labels = torch.nn.utils.rnn.pad_sequence(
-                [torch.tensor(x) for x in labels], 
-                batch_first=True, 
-                padding_value=-100  # Standard ignore index for CrossEntropyLoss
-            )
-        else:
-            labels = None
+            pad_tokens = torch.full((input_ids.size(0), 1), tokenizer.pad_token_id, dtype=input_ids.dtype)
+            labels = torch.cat((input_ids[:, 1:], pad_tokens), dim=1)
+            shift_mask = torch.zeros_like(attention_mask)
+            if attention_mask.size(1) > 1:
+                shift_mask[:, :-1] = attention_mask[:, 1:]
+            labels = labels.masked_fill(shift_mask == 0, -100)
             
         return {
             "input_ids": input_ids,

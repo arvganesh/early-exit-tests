@@ -1,39 +1,37 @@
+import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoTokenizer
 from transformers.modeling_outputs import MaskedLMOutput
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
-def masked_kl_loss(logits_log_prob, og_log_prob, kl_loss_mask, reduction='batchmean'):
-    # Apply loss mask (attention mask => B, T)
-    # Define a KLDivLoss function without reduction to get elementwise losses.
-    kl_loss_fct = torch.nn.KLDivLoss(reduction='none', log_target=True)
+def masked_kl_loss(
+    logits_log_prob: torch.Tensor,
+    og_log_prob: torch.Tensor,
+    kl_loss_mask: Optional[torch.Tensor],
+    reduction: str = "tokenmean",
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    kl_loss_fct = torch.nn.KLDivLoss(reduction="none", log_target=True)
 
-    # Compute the per-element loss (B, T, V)
+    # Per-element loss (B, T, V) where target is the reference distribution.
     loss_tensor = kl_loss_fct(logits_log_prob, og_log_prob)
+    loss_per_token = loss_tensor.sum(dim=-1)  # (B, T)
 
-    # Sum over the vocabulary dimension to get a per-token loss (B, T)
-    loss_per_token = loss_tensor.sum(dim=-1)
-
-    # Apply the attention mask.
-    # (Convert the mask to float so that 0's zero out the loss and 1's leave it unchanged.)
     if kl_loss_mask is not None:
-        mask = kl_loss_mask.float()
+        mask = kl_loss_mask.to(dtype=loss_per_token.dtype)
         masked_loss = loss_per_token * mask
+        denom = mask.sum().clamp_min(eps)
     else:
         masked_loss = loss_per_token
+        denom = torch.tensor(loss_per_token.numel(), device=loss_per_token.device, dtype=loss_per_token.dtype).clamp_min(eps)
 
-    # Normalize by batch size (B) to match "batchmean" behavior.
-    if reduction == 'batchmean':
-        batch_size = logits_log_prob.size(0)
-        loss = masked_loss.sum() / batch_size
-    elif reduction == 'mean':
-        loss = masked_loss.mean()
-    else:
-        raise Exception("Invalid reduction type.")
-
-    return loss
+    if reduction == "tokenmean":
+        return masked_loss.sum() / denom
+    if reduction == "batchmean":
+        return masked_loss.sum() / logits_log_prob.size(0)
+    raise ValueError(f"Invalid reduction type: {reduction}")
 
 class TruncatedLlama(nn.Module):
     def __init__(self, model_path: str, early_exit_idx: int, use_flash_attn: bool = False, ft_last_transformer = False, ft_head = False, lm_head_random_init = True):
@@ -77,8 +75,28 @@ class TruncatedLlama(nn.Module):
         if ft_head:
             for param in self.truncated_model.lm_head.parameters():
                 param.requires_grad = True
+
+        # Legacy attribute names used by evaluation scripts
+        self.new_lm_head = self.truncated_model.lm_head
+        self.headless_model = self.truncated_model.model
+
+    def _shift_attention_mask(self, attention_mask: torch.Tensor):
+        if attention_mask is None:
+            return None
+        shifted = torch.zeros_like(attention_mask)
+        if attention_mask.size(1) > 1:
+            shifted[:, :-1] = attention_mask[:, 1:]
+        return shifted
         
-    def forward(self, input_ids: torch.Tensor, attention_mask=None, labels=None, loss_type=None, keep_og_logits=False):
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask=None,
+        labels=None,
+        loss_type=None,
+        keep_og_logits: bool = False,
+        kl_temperature: float = 1.0,
+    ):
         # Process with reference model when needed
         og_lm_logits = None
         if loss_type == "kl_divergence" or keep_og_logits:
@@ -96,9 +114,21 @@ class TruncatedLlama(nn.Module):
             assert labels is not None
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         elif loss_type == "kl_divergence":
-            logits_log_prob = F.log_softmax(logits, dim=-1)
-            og_log_prob = F.log_softmax(og_lm_logits, dim=-1)
-            loss = masked_kl_loss(logits_log_prob, og_log_prob, attention_mask, reduction='mean')
+            logits_log_prob = F.log_softmax(logits / kl_temperature, dim=-1)
+            og_log_prob = F.log_softmax(og_lm_logits / kl_temperature, dim=-1)
+            kl_mask = self._shift_attention_mask(attention_mask)
+            loss = (kl_temperature**2) * masked_kl_loss(logits_log_prob, og_log_prob, kl_mask, reduction="tokenmean")
+        elif loss_type == "combined":
+            assert labels is not None
+            with torch.no_grad():
+                ref_outputs = self.reference_model(input_ids, attention_mask=attention_mask)
+                og_lm_logits = ref_outputs.logits
+            ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
+            logits_log_prob = F.log_softmax(logits / kl_temperature, dim=-1)
+            og_log_prob = F.log_softmax(og_lm_logits / kl_temperature, dim=-1)
+            kl_mask = self._shift_attention_mask(attention_mask)
+            kl_loss = (kl_temperature**2) * masked_kl_loss(logits_log_prob, og_log_prob, kl_mask, reduction="tokenmean")
+            loss = ce_loss + kl_loss
 
         return {
             "loss": loss,
@@ -135,13 +165,17 @@ class TruncatedLlama(nn.Module):
         return optimizer
 
     def generate(self, input_ids: torch.Tensor, max_length: int, eos_token_id: int):
-        for i in range(max_length):
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        for _ in range(max_length):
+            if input_ids.device.type == "cuda":
+                autocast_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            else:
+                autocast_ctx = contextlib.nullcontext()
+            with autocast_ctx:
                 outputs = self(input_ids)
             logits = outputs["logits"]
             next_token = torch.multinomial(torch.softmax(logits[:, -1, :], dim=-1), num_samples=1)
             input_ids = torch.cat([input_ids, next_token], dim=-1)
-            if next_token == eos_token_id:
+            if torch.all(next_token.squeeze(-1) == eos_token_id).item():
                 break
         return input_ids
 

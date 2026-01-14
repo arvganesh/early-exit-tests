@@ -32,17 +32,15 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True, nice_shape=True):
                                  mode="constant",
                                  value=0) for elem in batch], dim=0)
 
-    attention_mask = attention_mask[:, 1:]
-    pad_mask = torch.zeros(len(batch), 1)
-    attention_mask = torch.cat((attention_mask, pad_mask), dim=1)
-
-    pad_tokens = torch.full((len(batch), 1), tokenizer.pad_token_id)
+    pad_tokens = torch.full((len(batch), 1), tokenizer.pad_token_id, dtype=input_ids.dtype)
 
     labels = None
     if generate_labels:
-        labels = input_ids.clone()[:, 1:] # Remove first token from labels.
-        labels = torch.cat((labels, pad_tokens), dim=1) # Add another padding token
-        labels = labels.masked_fill(attention_mask == 0, -100)
+        labels = torch.cat((input_ids[:, 1:], pad_tokens), dim=1)
+        shift_mask = torch.zeros_like(attention_mask)
+        if attention_mask.size(1) > 1:
+            shift_mask[:, :-1] = attention_mask[:, 1:]
+        labels = labels.masked_fill(shift_mask == 0, -100)
         assert labels.shape == input_ids.shape
         
     return {

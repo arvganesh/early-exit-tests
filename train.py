@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
-from peft import LoraModel, LoraConfig
 from transformers import get_linear_schedule_with_warmup
 from datasets import load_dataset
 from data_utils import custom_collate_fn
@@ -51,6 +50,12 @@ parser.add_argument(
     choices=["perplexity", "kl_divergence", "combined"],
     default="perplexity",
     help="Type of loss to use during training."
+)
+parser.add_argument(
+    "--kl_temperature",
+    type=float,
+    default=1.0,
+    help="Temperature for KL distillation (typical values: 1-4)."
 )
 parser.add_argument(
     "--batch_size",
@@ -116,26 +121,6 @@ parser.add_argument(
     help="Notes about the run."
 )
 parser.add_argument(
-    "--use_lora",
-    action="store_true",
-    help="Enables PEFT with LoRA"
-)
-parser.add_argument(
-    "--lora_r",
-    type=int,
-    help="Rank for LoRA"
-)
-parser.add_argument(
-    "--use_rslora",
-    action="store_true",
-    help="enable to use rank stabilized lora"
-)
-parser.add_argument(
-    "--lora_alpha",
-    type=int,
-    help="Alpha for LoRA"
-)
-parser.add_argument(
     "--ft_last_transformer",
     action="store_true",
     help="finetune last transformer layer"
@@ -158,6 +143,11 @@ print(args)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Map CLI-facing names to model loss_type names.
+effective_loss_type = args.loss_type
+if effective_loss_type == "perplexity":
+    effective_loss_type = "cross_entropy"
+
 # Load tokenizer and create dataset.
 tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 tokenizer.pad_token = tokenizer.eos_token
@@ -176,10 +166,6 @@ if args.checkpoint_path is not None:
     if args.ft_last_transformer:
         assert checkpoint["last_transformer"] is None
         model.load_from_checkpoint(checkpoint["lm_head"], None)
-
-if args.use_lora:
-    cfg = LoraConfig(r = args.lora_r, lora_alpha = args.lora_alpha, use_rslora = args.use_rslora, target_modules = ["new_lm_head"], lora_dropout = 0.1, bias="none")
-    model = LoraModel(model, cfg, "lm-head-adapter")
 
 model.print_trainable_parameters()
 model.train()
@@ -201,7 +187,7 @@ train, test, val = get_fineweb_dataloaders(
     args.batch_size, 
     tokenizer, 
     args.max_length, 
-    generate_labels = args.loss_type == "cross_entropy", 
+    generate_labels = effective_loss_type in ("cross_entropy", "combined"), 
     seed = args.seed
 )
 DATASET_DESC = "Fineweb 10B tokens"
@@ -269,7 +255,11 @@ for step in range(args.max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
     for mini_step in range(args.grad_accumulate_steps):
-        next_batch = next(train_iter)
+        try:
+            next_batch = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train)
+            next_batch = next(train_iter)
         input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
         input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
 
@@ -279,10 +269,16 @@ for step in range(args.max_steps):
         total_tok += int(torch.prod(attn_mask_shape))
         num_examples += args.batch_size
 
-        if args.loss_type == "cross_entropy":
+        if effective_loss_type in ("cross_entropy", "combined"):
             labels = labels.to(args.device)
         with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
+            outputs = model(
+                input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                loss_type=effective_loss_type,
+                kl_temperature=args.kl_temperature,
+            )
 
         loss, logits = outputs["loss"], outputs["logits"]
         loss_accum += loss.detach()
@@ -291,14 +287,11 @@ for step in range(args.max_steps):
     if step % 10000 == 0 or step == args.max_steps - 1:
         save_path = os.path.join(save_folder, f"model_{step}_{loss_accum:.2f}.pt")
         
-        if not args.use_lora:
-            d = {
-                "lm_head": model.truncated_model.lm_head.state_dict(),
-                "last_transformer": model.truncated_model.model.layers[args.target_layer].state_dict() if args.ft_last_transformer else None
-            }
-            torch.save(d, save_path)
-        else:
-            pass
+        d = {
+            "lm_head": model.truncated_model.lm_head.state_dict(),
+            "last_transformer": model.truncated_model.model.layers[args.target_layer].state_dict() if args.ft_last_transformer else None
+        }
+        torch.save(d, save_path)
 
         model.eval()
         val_accum = 0.0
@@ -309,10 +302,16 @@ for step in range(args.max_steps):
                     break
                 input_ids, attention_mask, labels = batch["input_ids"],  batch["attention_mask"], batch["labels"]
                 input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
-                if args.loss_type == "cross_entropy":
+                if effective_loss_type in ("cross_entropy", "combined"):
                     labels = labels.to(args.device)
                 with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-                    outputs = model(input_ids, attention_mask=attention_mask, labels=labels, loss_type=args.loss_type)
+                    outputs = model(
+                        input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        loss_type=effective_loss_type,
+                        kl_temperature=args.kl_temperature,
+                    )
                 val_loss = outputs["loss"]
                 val_loss /= args.grad_accumulate_steps
                 val_accum += val_loss.detach()

@@ -7,6 +7,7 @@ import random
 import statistics
 import numpy as np
 from truncated_llama import TruncatedLlama
+from sampling_utils import sampling_probs_from_logits, safe_normalize
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from transformers import get_linear_schedule_with_warmup
 from share_gpt_dataset import get_sharegpt_dataloaders
@@ -31,6 +32,18 @@ parser.add_argument(
     type=float,
     default=1.0,
     help="Temperature value for softmax."
+)
+parser.add_argument(
+    "--top_p",
+    type=float,
+    default=1.0,
+    help="Nucleus sampling p (1.0 disables).",
+)
+parser.add_argument(
+    "--top_k",
+    type=int,
+    default=0,
+    help="Top-k sampling (0 disables).",
 )
 parser.add_argument(
     "--max_length",
@@ -73,6 +86,24 @@ parser.add_argument(
     "--flash_attn",
     action="store_true"
 )   
+parser.add_argument(
+    "--speculate_len",
+    type=int,
+    default=8,
+    help="Number of draft tokens proposed per target verification (gamma).",
+)
+parser.add_argument(
+    "--num_iters",
+    type=int,
+    default=256,
+    help="Number of target verification iterations per example.",
+)
+parser.add_argument(
+    "--num_samples",
+    type=int,
+    default=500,
+    help="Number of dataset examples to evaluate.",
+)
 
 args = parser.parse_args()
 
@@ -87,12 +118,97 @@ tokenizer.pad_token = tokenizer.eos_token
 
 # Temp = 0 -> argmax.
 def temperature_softmax(logits, temp=1.0):
-    if temp == 0:
-        max_idx = torch.argmax(logits)
-        onehot = F.one_hot(max_idx, num_classes=logits.size(-1)).to(torch.float32)
-        return torch.unsqueeze(onehot, 0)
-    logits /= temp
-    return torch.softmax(logits, dim=-1)
+    logits = logits / temp
+    return torch.softmax(logits, dim=-1, dtype=torch.float32)
+
+def _safe_normalize(dist: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    return safe_normalize(dist, eps=eps)
+
+def spec_step(
+    model: TruncatedLlama,
+    input_ids: torch.Tensor,
+    temperature: float,
+    speculate_len: int,
+    top_p: float,
+    top_k: int,
+) -> tuple[torch.Tensor, int, float]:
+    """
+    Runs one speculative decoding iteration:
+      - propose `speculate_len` draft tokens from the early-exit model
+      - verify with target (reference) model
+      - accept/reject per the exact sampling-correct rule
+
+    Returns:
+      updated_input_ids, num_accepted_draft_tokens, mean_per_token_overlap_for_this_block
+    """
+    device = input_ids.device
+    attn_mask = torch.ones_like(input_ids, device=device)
+    prefix_len = input_ids.size(1)
+
+    draft_logits_list = []
+    draft_tokens_list = []
+
+    # Draft proposes gamma tokens sequentially.
+    for _ in range(speculate_len):
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            draft_out = model.truncated_model(input_ids, attention_mask=attn_mask)
+        logits = draft_out.logits[:, -1, :]  # predicts next token
+        q = sampling_probs_from_logits(logits, temperature=temperature, top_p=top_p, top_k=top_k)  # (B, V)
+        tok = torch.multinomial(q, 1)  # (B, 1)
+        draft_logits_list.append(logits)
+        draft_tokens_list.append(tok)
+        input_ids = torch.cat([input_ids, tok], dim=1)
+        attn_mask = torch.cat([attn_mask, torch.ones((attn_mask.size(0), 1), device=device, dtype=attn_mask.dtype)], dim=1)
+
+    # Verify with target once on the full proposed prefix (causal => logits don't depend on future tokens).
+    with torch.no_grad():
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            ref_out = model.reference_model(input_ids, attention_mask=attn_mask)
+    ref_logits = ref_out.logits  # (B, T, V)
+
+    num_accepted = 0
+    overlaps = []
+
+    # Accept/reject sequentially.
+    for j in range(speculate_len):
+        tok = draft_tokens_list[j]  # (B, 1)
+
+        # Distributions for token at position prefix_len + j are predicted at index (prefix_len + j - 1).
+        pred_idx = prefix_len + j - 1
+
+        p = sampling_probs_from_logits(ref_logits[:, pred_idx, :], temperature=temperature, top_p=top_p, top_k=top_k)  # (B, V)
+        q = sampling_probs_from_logits(draft_logits_list[j], temperature=temperature, top_p=top_p, top_k=top_k)        # (B, V)
+        overlaps.append(torch.minimum(p, q).sum(dim=-1))  # per-batch
+
+        p_tok = p.gather(-1, tok)  # (B, 1)
+        q_tok = q.gather(-1, tok).clamp_min(1e-12)
+        accept_prob = torch.minimum(torch.ones_like(p_tok), p_tok / q_tok)  # (B, 1)
+        u = torch.rand_like(accept_prob)
+
+        if (u < accept_prob).all():
+            num_accepted += 1
+            continue
+
+        # Rejection at token j: sample from corrected distribution proportional to (p - q)+.
+        fix = torch.clamp(p - q, min=0.0)
+        fix = _safe_normalize(fix)
+        if not torch.isfinite(fix).all() or (fix.sum(dim=-1) == 0).any():
+            fix = p
+        new_tok = torch.multinomial(fix, 1)
+
+        # Keep accepted tokens, replace rejected one, and discard remaining proposals.
+        input_ids = input_ids[:, : prefix_len + j]  # accepted prefix (prompt + accepted draft tokens)
+        input_ids = torch.cat([input_ids, new_tok], dim=1)
+        mean_overlap = torch.stack(overlaps, dim=0).mean().item() if overlaps else 0.0
+        return input_ids, num_accepted, mean_overlap
+
+    # Accepted all gamma draft tokens: sample one token from target at the end.
+    p_next = sampling_probs_from_logits(ref_logits[:, -1, :], temperature=temperature, top_p=top_p, top_k=top_k)
+    next_tok = torch.multinomial(p_next, 1)
+    input_ids = torch.cat([input_ids, next_tok], dim=1)
+
+    mean_overlap = torch.stack(overlaps, dim=0).mean().item() if overlaps else 0.0
+    return input_ids, num_accepted, mean_overlap
 
 #temps = [0.0, 0.2, 1.0]
 temps = [args.softmax_temperature]
@@ -162,80 +278,62 @@ for path in model_paths:
                     seed = args.seed
                 )
 
-            total_agreement_tok = 0
-            agreement_stats = []
+            accepted_stats = []
+            overlap_stats = []
             print(f"Num examples: {len(val)}")
-            num_samples = 5000
             for idx, batch in enumerate(val):
-                if idx >= num_samples:
+                if idx >= args.num_samples:
                     break 
-                input_ids = batch["input_ids"]
-                input_ids = input_ids[:, :input_ids.size(1) // 2]
-                input_ids = input_ids.to(args.device)
-                agreement_length = 0
-                
-                should_print = False
-                if should_print:
-                    print(f"{(idx + 1) / len(val) * 100:.2f}% of the way there!")
-                    print(f"Initial prompt: {tokenizer.decode(input_ids[0], skip_special_tokens=True)}")
+                input_ids = batch["input_ids"].to(args.device)
+                attention_mask = batch["attention_mask"].to(args.device)
+                true_len = int(attention_mask.sum().item())
+                prompt_len = max(1, true_len // 2)
+                input_ids = input_ids[:, :prompt_len]
 
-                for i in range(2048):
-                    with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
-                        outputs = model(input_ids, keep_og_logits=True)
+                total_accepted = 0
+                total_overlap = 0.0
+                for _ in range(args.num_iters):
+                    input_ids, accepted, mean_overlap = spec_step(
+                        model=model,
+                        input_ids=input_ids,
+                        temperature=temp,
+                        speculate_len=args.speculate_len,
+                        top_p=args.top_p,
+                        top_k=args.top_k,
+                    )
+                    total_accepted += accepted
+                    total_overlap += mean_overlap
 
-                    # Early exit with finetuned head.  
-                    logits = outputs["logits"][:, -1, :] 
-                    ee_probs = temperature_softmax(logits, temp=temp)
-                    ee_sample = torch.multinomial(ee_probs, 1) 
-                    
-                    # Baseline Llama (unmodified)
-                    og_logits = outputs["og_lm_logits"][:, -1, :]
-                    og_probs = temperature_softmax(og_logits, temp=temp) 
-                    og_sample = torch.multinomial(og_probs, 1)
-
-                    """
-                    For speculative decoding, there are two cases where disagreement can occur:
-                    
-                    1. Sampled tokens don't match.
-                    2. Sampled tokens match, but we "oversampled" in the draft model and reject the original token. 
-                    After resampling from an adjusted distribution, we might disagree.
-                    """
-                    if not torch.equal(ee_sample, og_sample):
-                        if should_print:
-                            print(f"ee_tok: {ee_sample.item()} og_tok: {og_sample.item()}")
-                            print(f"P({ee_sample.item()} in EE_MODEL) = {ee_probs[0, ee_sample.item()]}")
-                            print(f"P({ee_sample.item()} in OG_MODEL) = {og_probs[0, ee_sample.item()]}")
-                            print(f"P({og_sample.item()} in EE_MODEL) = {ee_probs[0, og_sample.item()]}")
-                            print(f"P({og_sample.item()} in OG_MODEL) = {og_probs[0, og_sample.item()]}")
-                        break
-                    elif temp != 0:
-                        # We oversampled from the draft model. 
-                        sample = ee_sample[0].item()
-                        if ee_probs[:, sample] > og_probs[:, sample]:
-                            break
-                    agreement_length += 1
-                    input_ids = torch.cat((input_ids, ee_sample), dim=1)
-                
-                if should_print and agreement_length >= 10:
-                    print(agreement_length, idx)
-                agreement_stats.append(agreement_length)
-                total_agreement_tok += agreement_length 
+                accepted_stats.append(total_accepted / args.num_iters)
+                overlap_stats.append(total_overlap / args.num_iters)
         
-        avg_agreement = total_agreement_tok / num_samples
-        min_agreement = min(agreement_stats)
-        max_agreement = max(agreement_stats)
-        median_agreement = statistics.median(agreement_stats)
-        std_agreement = statistics.stdev(agreement_stats) if len(agreement_stats) > 1 else 0.0
-        percentiles = np.percentile(agreement_stats, [25, 50, 75])
-        print(f"Average agreement length: {total_agreement_tok / num_samples:.5f}")
+        avg_accepted = float(np.mean(accepted_stats)) if accepted_stats else 0.0
+        avg_overlap = float(np.mean(overlap_stats)) if overlap_stats else 0.0
+        avg_tv = 1.0 - avg_overlap
+        min_accepted = min(accepted_stats) if accepted_stats else 0.0
+        max_accepted = max(accepted_stats) if accepted_stats else 0.0
+        median_accepted = statistics.median(accepted_stats) if accepted_stats else 0.0
+        std_accepted = statistics.stdev(accepted_stats) if len(accepted_stats) > 1 else 0.0
+        percentiles = np.percentile(accepted_stats, [25, 50, 75]) if accepted_stats else [0.0, 0.0, 0.0]
+
+        print(f"Avg accepted draft tokens per target call: {avg_accepted:.5f} (gamma={args.speculate_len})")
+        print(f"Avg per-token overlap (sum(min(p,q))): {avg_overlap:.5f} (TV={avg_tv:.5f})")
         agreement_stats_mdl[temp] = {
-            "data": agreement_stats,
-            "avg_agreement": avg_agreement,
-            "min_agreement": min_agreement,
-            "max_agreement": max_agreement,
-            "median_agreement": median_agreement,
-            "std_agreement": std_agreement,
-            "percentiles255075": list(percentiles)
+            "accepted_per_iter": accepted_stats,
+            "overlap_per_iter": overlap_stats,
+            "avg_accepted": avg_accepted,
+            "avg_overlap": avg_overlap,
+            "avg_tv": avg_tv,
+            "min_accepted": min_accepted,
+            "max_accepted": max_accepted,
+            "median_accepted": median_accepted,
+            "std_accepted": std_accepted,
+            "percentiles255075": list(percentiles),
+            "speculate_len": args.speculate_len,
+            "num_iters": args.num_iters,
+            "num_samples": args.num_samples,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
         }
         agreement_stats_all[path] = agreement_stats_mdl
     
