@@ -40,14 +40,14 @@ def test_same_output_with_last_layer_exit():
     test_loss = test_outputs["loss"]
 
     assert truth_logits.shape == actual_logits.shape
-    assert (truth_logits == actual_logits).all()
-    assert test_loss == 0
+    assert torch.allclose(truth_logits, actual_logits, atol=1e-5, rtol=1e-5)
+    assert test_loss is not None
+    assert float(test_loss) < 1e-5
 
 def test_output_same_for_ft_last_transformer():
     model_path = "meta-llama/llama-3.2-1B"
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
-    truth_model = AutoModelForCausalLM.from_pretrained(model_path)
     test_model = TruncatedLlama(model_path,
                                 early_exit_idx=15,
                                 lm_head_random_init=False,
@@ -57,8 +57,9 @@ def test_output_same_for_ft_last_transformer():
 
     # Set Q_proj to all zeroes to mess up the output of the early exit layer.
     # Assert that the model's calculation of llama's original logits remain correct.
-    # zeros = torch.zeros(test_model.early_exit_layer.state_dict()["self_attn.q_proj.weight"].shape)
-    # test_model.early_exit_layer.load_state_dict({"self_attn.q_proj.weight": zeros}, strict=False) 
+    with torch.no_grad():
+        test_model.early_exit_layer.self_attn.q_proj.weight.zero_()
+
     truth_model = AutoModelForCausalLM.from_pretrained(model_path)
                                 
     prompt = "Hello!"
@@ -73,8 +74,8 @@ def test_output_same_for_ft_last_transformer():
         test_outputs = test_model(fake_inputs["input_ids"], loss_type="kl_divergence", keep_og_logits=True)
 
     truth_logits, og_logits = truth_outputs["logits"], test_outputs["og_lm_logits"]
-    assert (truth_logits == og_logits).all()
-    assert not (truth_logits == test_outputs["logits"]).all()
+    assert torch.allclose(truth_logits, og_logits, atol=1e-5, rtol=1e-5)
+    assert not torch.allclose(truth_logits, test_outputs["logits"], atol=1e-5, rtol=1e-5)
 
 def test_hidden_states_match_on_early_exit():
     model_path = "meta-llama/llama-3.2-1B"

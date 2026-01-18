@@ -16,10 +16,12 @@ import math
 import time
 import argparse
 from datetime import datetime
+import contextlib
 
 from truncated_llama import TruncatedLlama
 from share_gpt_dataset import get_sharegpt_dataloaders
 from fineweb_dataset import get_fineweb_dataloaders
+from data_utils import get_toy_dataloaders
 parser = argparse.ArgumentParser(description="Train a truncated Llama model with a tuned head.")
 parser.add_argument(
     "--model_path",
@@ -43,6 +45,13 @@ parser.add_argument(
     type=int,
     default=0,
     help="Seed for dataset split."
+)
+parser.add_argument(
+    "--dataset",
+    type=str,
+    choices=["fineweb", "sharegpt", "toy"],
+    default="fineweb",
+    help="Dataset to use for training/eval.",
 )
 parser.add_argument(
     "--loss_type",
@@ -147,6 +156,8 @@ logger = logging.getLogger(__name__)
 effective_loss_type = args.loss_type
 if effective_loss_type == "perplexity":
     effective_loss_type = "cross_entropy"
+device_type = "cuda" if str(args.device).startswith("cuda") else str(args.device)
+use_autocast = device_type == "cuda"
 
 # Load tokenizer and create dataset.
 tokenizer = AutoTokenizer.from_pretrained(args.model_path)
@@ -168,6 +179,12 @@ if args.checkpoint_path is not None:
         model.load_from_checkpoint(checkpoint["lm_head"], None)
 
 model.print_trainable_parameters()
+num_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+if num_trainable_params == 0:
+    raise ValueError(
+        "No trainable parameters. Pass `--ft_head` and/or `--ft_last_transformer` "
+        "to enable training of the early-exit head and/or the last retained transformer block."
+    )
 model.train()
 model.to(args.device)
 ## Training Loop
@@ -181,16 +198,36 @@ model.to(args.device)
 # train, test, val = get_sharegpt_dataloaders(args.batch_size, tokenizer, args.max_length, generate_labels = args.loss_type == "cross_entropy", seed=args.seed)
 # DATASET_DESC = "shareGPT with non-english removed"
 
-# Import and use the Fineweb dataloader
-# Use the fineweb dataloaders
-train, test, val = get_fineweb_dataloaders(
-    args.batch_size, 
-    tokenizer, 
-    args.max_length, 
-    generate_labels = effective_loss_type in ("cross_entropy", "combined"), 
-    seed = args.seed
-)
-DATASET_DESC = "Fineweb 10B tokens"
+generate_labels = effective_loss_type in ("cross_entropy", "combined")
+if args.dataset == "fineweb":
+    train, test, val = get_fineweb_dataloaders(
+        args.batch_size,
+        tokenizer,
+        args.max_length,
+        generate_labels=generate_labels,
+        seed=args.seed,
+    )
+    DATASET_DESC = "Fineweb 10B tokens"
+elif args.dataset == "sharegpt":
+    train, test, val = get_sharegpt_dataloaders(
+        args.batch_size,
+        tokenizer,
+        args.max_length,
+        generate_labels=generate_labels,
+        seed=args.seed,
+    )
+    DATASET_DESC = "ShareGPT90K"
+elif args.dataset == "toy":
+    train, test, val = get_toy_dataloaders(
+        args.batch_size,
+        tokenizer,
+        args.max_length,
+        generate_labels=generate_labels,
+        nice_shape=True,
+    )
+    DATASET_DESC = "Toy strings"
+else:
+    raise ValueError(f"Unknown dataset: {args.dataset}")
 
 # Uncomment to use SlimPJ
 # train_dataset = SlimPJDataset(tokenizer, max_length=max_length, split="train", num_proc=8)
@@ -271,7 +308,12 @@ for step in range(args.max_steps):
 
         if effective_loss_type in ("cross_entropy", "combined"):
             labels = labels.to(args.device)
-        with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
+        autocast_ctx = (
+            torch.autocast(device_type=device_type, dtype=torch.bfloat16)
+            if use_autocast
+            else contextlib.nullcontext()
+        )
+        with autocast_ctx:
             outputs = model(
                 input_ids,
                 attention_mask=attention_mask,
@@ -304,7 +346,12 @@ for step in range(args.max_steps):
                 input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
                 if effective_loss_type in ("cross_entropy", "combined"):
                     labels = labels.to(args.device)
-                with torch.autocast(device_type=args.device, dtype=torch.bfloat16):
+                autocast_ctx = (
+                    torch.autocast(device_type=device_type, dtype=torch.bfloat16)
+                    if use_autocast
+                    else contextlib.nullcontext()
+                )
+                with autocast_ctx:
                     outputs = model(
                         input_ids,
                         attention_mask=attention_mask,
