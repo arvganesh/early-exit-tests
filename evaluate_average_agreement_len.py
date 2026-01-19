@@ -8,8 +8,7 @@ import statistics
 import numpy as np
 from truncated_llama import TruncatedLlama
 from sampling_utils import sampling_probs_from_logits, safe_normalize
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
-from transformers import get_linear_schedule_with_warmup
+from transformers import AutoTokenizer
 from share_gpt_dataset import get_sharegpt_dataloaders
 from data_utils import get_toy_dataloaders
 from fineweb_dataset import get_fineweb_dataloaders

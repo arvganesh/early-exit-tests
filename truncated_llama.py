@@ -2,8 +2,7 @@ import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import LlamaForCausalLM, Trainer, TrainingArguments, AutoTokenizer
-from transformers.modeling_outputs import MaskedLMOutput
+from transformers import LlamaForCausalLM
 from typing import List, Tuple, Optional
 
 def masked_kl_loss(
