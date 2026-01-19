@@ -114,6 +114,12 @@ parser.add_argument(
     help="Use to enable logging to wandb."
 )
 parser.add_argument(
+    "--wandb_project",
+    type=str,
+    default="early-exit-tests",
+    help="Weights & Biases project name (used only when --wandb is set).",
+)
+parser.add_argument(
     "--lm_head_random_init",
     action="store_true",
     help="Randomly initializes the LM head to train."
@@ -254,7 +260,7 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 # Initialize wandb
 if args.wandb:
     wandb.init(
-        project="Early Exiting Llama 3.2 1B FineWeb, phase 4",
+        project=args.wandb_project,
         config=args,
         mode="online",
         notes=args.notes
