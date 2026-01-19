@@ -49,7 +49,18 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True, nice_shape=True):
         "labels": labels
     }
 
-def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = True, nice_shape = True):
+def get_toy_dataloaders(
+    batch_size,
+    tokenizer,
+    max_length,
+    generate_labels=True,
+    nice_shape=True,
+    *,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int = 2,
+):
     dataset = [
         "abcdefghij",
         "klmnopqrst",
@@ -84,8 +95,36 @@ def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = Tru
     test_set = list(map(tokenizer_wrapper, dataset[10:15]))
     val_set = list(map(tokenizer_wrapper, dataset[15:]))
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
-    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    train_loader = DataLoader(
+        train_set,
+        collate_fn=lambda batch: custom_collate_fn(
+            batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape
+        ),
+        **loader_kwargs,
+    )
+    test_loader = DataLoader(
+        test_set,
+        collate_fn=lambda batch: custom_collate_fn(
+            batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape
+        ),
+        **loader_kwargs,
+    )
+    val_loader = DataLoader(
+        val_set,
+        collate_fn=lambda batch: custom_collate_fn(
+            batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape
+        ),
+        **loader_kwargs,
+    )
 
     return train_loader, test_loader, val_loader

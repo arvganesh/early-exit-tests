@@ -15,6 +15,7 @@ import pickle
 import math
 import time
 import argparse
+import sys
 from datetime import datetime
 import contextlib
 
@@ -52,6 +53,42 @@ parser.add_argument(
     choices=["fineweb", "sharegpt", "toy"],
     default="fineweb",
     help="Dataset to use for training/eval.",
+)
+parser.add_argument(
+    "--fineweb_streaming",
+    action="store_true",
+    default=True,
+    help="Use streaming FineWeb loading (recommended).",
+)
+parser.add_argument(
+    "--no_fineweb_streaming",
+    action="store_false",
+    dest="fineweb_streaming",
+    help="Disable streaming for FineWeb (not recommended; slow for large splits).",
+)
+parser.add_argument(
+    "--fineweb_shuffle_buffer_size",
+    type=int,
+    default=10_000,
+    help="Shuffle buffer size for streaming FineWeb.",
+)
+parser.add_argument(
+    "--fineweb_train_examples",
+    type=int,
+    default=None,
+    help="Optional cap on number of FineWeb training examples (dry runs).",
+)
+parser.add_argument(
+    "--fineweb_val_examples",
+    type=int,
+    default=512,
+    help="Number of FineWeb validation examples.",
+)
+parser.add_argument(
+    "--fineweb_test_examples",
+    type=int,
+    default=512,
+    help="Number of FineWeb test examples.",
 )
 parser.add_argument(
     "--loss_type",
@@ -120,6 +157,42 @@ parser.add_argument(
     help="Weights & Biases project name (used only when --wandb is set).",
 )
 parser.add_argument(
+    "--dataloader_num_workers",
+    type=int,
+    default=-1,
+    help="PyTorch DataLoader workers (-1 = auto; on macOS defaults to 0).",
+)
+parser.add_argument(
+    "--dataloader_prefetch_factor",
+    type=int,
+    default=2,
+    help="DataLoader prefetch_factor (only used when num_workers > 0).",
+)
+parser.add_argument(
+    "--dataloader_pin_memory",
+    action="store_true",
+    default=None,
+    help="Enable DataLoader pin_memory (default: auto, enabled for CUDA).",
+)
+parser.add_argument(
+    "--no_dataloader_pin_memory",
+    action="store_false",
+    dest="dataloader_pin_memory",
+    help="Disable DataLoader pin_memory.",
+)
+parser.add_argument(
+    "--dataloader_persistent_workers",
+    action="store_true",
+    default=None,
+    help="Keep DataLoader workers alive (default: auto, enabled when num_workers > 0).",
+)
+parser.add_argument(
+    "--no_dataloader_persistent_workers",
+    action="store_false",
+    dest="dataloader_persistent_workers",
+    help="Disable DataLoader persistent_workers.",
+)
+parser.add_argument(
     "--lm_head_random_init",
     action="store_true",
     help="Randomly initializes the LM head to train."
@@ -164,6 +237,39 @@ if effective_loss_type == "perplexity":
     effective_loss_type = "cross_entropy"
 device_type = "cuda" if str(args.device).startswith("cuda") else str(args.device)
 use_autocast = device_type == "cuda"
+
+# DataLoader defaults.
+if args.dataloader_num_workers < 0:
+    if sys.platform == "darwin":
+        args.dataloader_num_workers = 0
+    else:
+        cpu_count = os.cpu_count() or 1
+        args.dataloader_num_workers = min(8, max(1, cpu_count // 2))
+if args.dataloader_pin_memory is None:
+    args.dataloader_pin_memory = device_type == "cuda"
+if args.dataloader_persistent_workers is None:
+    args.dataloader_persistent_workers = args.dataloader_num_workers > 0
+
+# Add dataset info to run notes before any slow setup (e.g. data loading).
+if args.dataset == "fineweb":
+    streaming_desc = "streaming" if args.fineweb_streaming else "non-streaming"
+    DATASET_DESC = f"Fineweb 10B tokens ({streaming_desc})"
+elif args.dataset == "sharegpt":
+    DATASET_DESC = "ShareGPT90K"
+elif args.dataset == "toy":
+    DATASET_DESC = "Toy strings"
+else:
+    raise ValueError(f"Unknown dataset: {args.dataset}")
+args.notes += f"\nDataset: {DATASET_DESC}"
+
+# Initialize wandb before data loading.
+if args.wandb:
+    wandb.init(
+        project=args.wandb_project,
+        config=args,
+        mode="online",
+        notes=args.notes,
+    )
 
 # Load tokenizer and create dataset.
 tokenizer = AutoTokenizer.from_pretrained(args.model_path)
@@ -212,8 +318,16 @@ if args.dataset == "fineweb":
         args.max_length,
         generate_labels=generate_labels,
         seed=args.seed,
+        streaming=args.fineweb_streaming,
+        shuffle_buffer_size=args.fineweb_shuffle_buffer_size,
+        train_examples=args.fineweb_train_examples,
+        val_examples=args.fineweb_val_examples,
+        test_examples=args.fineweb_test_examples,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.dataloader_pin_memory,
+        persistent_workers=args.dataloader_persistent_workers,
+        prefetch_factor=args.dataloader_prefetch_factor,
     )
-    DATASET_DESC = "Fineweb 10B tokens"
 elif args.dataset == "sharegpt":
     train, test, val = get_sharegpt_dataloaders(
         args.batch_size,
@@ -221,8 +335,11 @@ elif args.dataset == "sharegpt":
         args.max_length,
         generate_labels=generate_labels,
         seed=args.seed,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.dataloader_pin_memory,
+        persistent_workers=args.dataloader_persistent_workers,
+        prefetch_factor=args.dataloader_prefetch_factor,
     )
-    DATASET_DESC = "ShareGPT90K"
 elif args.dataset == "toy":
     train, test, val = get_toy_dataloaders(
         args.batch_size,
@@ -230,8 +347,11 @@ elif args.dataset == "toy":
         args.max_length,
         generate_labels=generate_labels,
         nice_shape=True,
+        num_workers=args.dataloader_num_workers,
+        pin_memory=args.dataloader_pin_memory,
+        persistent_workers=args.dataloader_persistent_workers,
+        prefetch_factor=args.dataloader_prefetch_factor,
     )
-    DATASET_DESC = "Toy strings"
 else:
     raise ValueError(f"Unknown dataset: {args.dataset}")
 
@@ -254,18 +374,6 @@ else:
 
 
 # train_dataset = load_dataset("Salesforce/wikitext", "wikitext-2-v1", split="train", num_proc=8)
-
-args.notes += f"\nDataset: {DATASET_DESC}"
-
-# Initialize wandb
-if args.wandb:
-    wandb.init(
-        project=args.wandb_project,
-        config=args,
-        mode="online",
-        notes=args.notes
-    )
-
 # Weight decay, initial learning rate, set basic hyperparams.
 # optimizer = model.configure_optimizers(weight_decay, args.learning_rate, args.device)
 use_fused = args.device == "cuda"
@@ -292,8 +400,12 @@ gradients = {}
 non_pad_tok = 0
 total_tok = 0
 num_examples = 0
-num_train_batches = len(train)
+try:
+    num_train_batches = len(train)
+except TypeError:
+    num_train_batches = None
 train_iter = iter(train)
+non_blocking = bool(args.dataloader_pin_memory and device_type == "cuda")
 for step in range(args.max_steps):
     # Get data tensors, move to device.
     loss_accum = 0.0
@@ -304,16 +416,16 @@ for step in range(args.max_steps):
             train_iter = iter(train)
             next_batch = next(train_iter)
         input_ids, attention_mask, labels = next_batch["input_ids"],  next_batch["attention_mask"], next_batch["labels"]
-        input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+        input_ids = input_ids.to(args.device, non_blocking=non_blocking)
+        attention_mask = attention_mask.to(args.device, non_blocking=non_blocking)
 
         # track data stats
-        non_pad_tok += attention_mask.sum()
-        attn_mask_shape = torch.tensor(attention_mask.size())
-        total_tok += int(torch.prod(attn_mask_shape))
+        non_pad_tok += int(attention_mask.sum().item())
+        total_tok += int(attention_mask.numel())
         num_examples += args.batch_size
 
         if effective_loss_type in ("cross_entropy", "combined"):
-            labels = labels.to(args.device)
+            labels = labels.to(args.device, non_blocking=non_blocking)
         autocast_ctx = (
             torch.autocast(device_type=device_type, dtype=torch.bfloat16)
             if use_autocast
@@ -349,9 +461,10 @@ for step in range(args.max_steps):
                 if batch_idx > 500:
                     break
                 input_ids, attention_mask, labels = batch["input_ids"],  batch["attention_mask"], batch["labels"]
-                input_ids, attention_mask = input_ids.to(args.device), attention_mask.to(args.device)
+                input_ids = input_ids.to(args.device, non_blocking=non_blocking)
+                attention_mask = attention_mask.to(args.device, non_blocking=non_blocking)
                 if effective_loss_type in ("cross_entropy", "combined"):
-                    labels = labels.to(args.device)
+                    labels = labels.to(args.device, non_blocking=non_blocking)
                 autocast_ctx = (
                     torch.autocast(device_type=device_type, dtype=torch.bfloat16)
                     if use_autocast
@@ -397,7 +510,10 @@ for step in range(args.max_steps):
 if args.wandb:
     wandb.finish()
 
-print(f"non_pad: {non_pad_tok}, total_tokens: {total_tok}, #examples: {num_examples}, train_size: {num_train_batches * 4}")
+train_size_str = "unknown"
+if num_train_batches is not None:
+    train_size_str = str(num_train_batches)
+print(f"non_pad: {non_pad_tok}, total_tokens: {total_tok}, #examples: {num_examples}, train_batches: {train_size_str}")
 
 # Generate from model every 100 steps.
 # .generate() uses autocast.

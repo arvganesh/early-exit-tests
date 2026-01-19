@@ -2,58 +2,69 @@ import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 
-def get_fineweb_dataloaders(batch_size, tokenizer, max_length, generate_labels=False, seed=42):
+def get_fineweb_dataloaders(
+    batch_size,
+    tokenizer,
+    max_length,
+    generate_labels: bool = False,
+    seed: int = 42,
+    *,
+    streaming: bool = True,
+    shuffle_buffer_size: int = 10_000,
+    train_examples: int | None = None,
+    val_examples: int = 512,
+    test_examples: int = 512,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int = 2,
+):
     """
     Load and prepare the 10B Fineweb dataset for training.
     Returns train, test, val dataloaders.
     """
-    # Load the Fineweb dataset (10B tokens version)
-    dataset = load_dataset("HuggingFaceFW/fineweb", name="sample-10BT", split="train", streaming=False)
-    
-    # Shuffle and take a subset for validation and testing
-    dataset = dataset.shuffle(seed=seed)
-    
-    # Define tokenization function
+    dataset = load_dataset(
+        "HuggingFaceFW/fineweb",
+        name="sample-10BT",
+        split="train",
+        streaming=streaming,
+    )
+
+    # For streaming datasets, shuffle uses a buffer; for non-streaming, it's a full shuffle.
+    shuffle_kwargs = {"seed": seed}
+    if streaming:
+        shuffle_kwargs["buffer_size"] = shuffle_buffer_size
+    dataset = dataset.shuffle(**shuffle_kwargs)
+
     def tokenize_function(examples):
-        result = tokenizer(
+        return tokenizer(
             examples["text"],
             padding=False,
             truncation=True,
             max_length=max_length,
             return_tensors=None,
         )
-        return result
-    
-    # Tokenize dataset
+
+    # For streaming, .map is lazy; for non-streaming, it's eager and can take a long time.
     tokenized_dataset = dataset.map(
         tokenize_function,
-        remove_columns=["text", "url", "date"]
+        batched=True,
+        batch_size=256,
+        remove_columns=["text", "url", "date"],
     )
-    
-    # Create splits - for a dataset this large, we'll use streaming
-    # This creates iterators that can be used indefinitely
-    train_dataset = tokenized_dataset.take(9_800_000)  # Most for training
-    val_dataset = tokenized_dataset.skip(9_800_000).take(100_000)  # 100k for validation
-    test_dataset = tokenized_dataset.skip(9_900_000).take(100_000)  # 100k for testing
+
+    # Keep val/test small and cheap: avoid skipping millions of rows.
+    val_dataset = tokenized_dataset.take(val_examples)
+    test_dataset = tokenized_dataset.skip(val_examples).take(test_examples)
+    train_dataset = tokenized_dataset.skip(val_examples + test_examples)
+    if train_examples is not None:
+        train_dataset = train_dataset.take(train_examples)
     
     # Create custom collate function
     def collate_fn(batch):
-        # Process batch and handle variable lengths
-        input_ids = [item["input_ids"] for item in batch]
-        attention_mask = [item["attention_mask"] for item in batch]
-        
-        # Pad sequences
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(x) for x in input_ids], 
-            batch_first=True, 
-            padding_value=tokenizer.pad_token_id
-        )
-        
-        attention_mask = torch.nn.utils.rnn.pad_sequence(
-            [torch.tensor(x) for x in attention_mask], 
-            batch_first=True, 
-            padding_value=0
-        )
+        padded = tokenizer.pad(batch, padding=True, return_tensors="pt")
+        input_ids = padded["input_ids"]
+        attention_mask = padded["attention_mask"]
         
         labels = None
         if generate_labels:
@@ -70,26 +81,31 @@ def get_fineweb_dataloaders(batch_size, tokenizer, max_length, generate_labels=F
             "labels": labels
         }
     
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=False,  # already shuffled above (or buffered shuffle if streaming)
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+
     # Create DataLoaders
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        collate_fn=collate_fn,
-        shuffle=False  # Already shuffled the dataset
+        train_dataset,
+        **loader_kwargs,
     )
     
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        collate_fn=collate_fn,
-        shuffle=False
+        val_dataset,
+        **loader_kwargs,
     )
     
     test_loader = DataLoader(
-        test_dataset, 
-        batch_size=batch_size, 
-        collate_fn=collate_fn,
-        shuffle=False
+        test_dataset,
+        **loader_kwargs,
     )
     
-    return train_loader, test_loader, val_loader 
+    return train_loader, test_loader, val_loader

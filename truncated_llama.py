@@ -2,7 +2,7 @@ import contextlib
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import LlamaForCausalLM
+from transformers import AutoModelForCausalLM
 from typing import List, Tuple, Optional
 
 def masked_kl_loss(
@@ -37,9 +37,9 @@ class TruncatedLlama(nn.Module):
         super().__init__()
         # Load reference model (always kept frozen)
         if use_flash_attn:
-            self.reference_model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
+            self.reference_model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
         else:
-            self.reference_model = LlamaForCausalLM.from_pretrained(model_path)
+            self.reference_model = AutoModelForCausalLM.from_pretrained(model_path)
 
         # Freeze reference model
         for param in self.reference_model.parameters():
@@ -47,9 +47,15 @@ class TruncatedLlama(nn.Module):
             
         # Load truncated model (for early exit)
         if use_flash_attn:
-            self.truncated_model = LlamaForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
+            self.truncated_model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
         else:
-            self.truncated_model = LlamaForCausalLM.from_pretrained(model_path)
+            self.truncated_model = AutoModelForCausalLM.from_pretrained(model_path)
+
+        if not (hasattr(self.truncated_model, "model") and hasattr(self.truncated_model.model, "layers") and hasattr(self.truncated_model, "lm_head")):
+            raise TypeError(
+                "TruncatedLlama expects a LLaMA-like causal LM with `.model.layers` and `.lm_head`. "
+                f"Got type={type(self.truncated_model)} from model_path={model_path}."
+            )
             
         # Freeze all parameters in truncated model by default
         for param in self.truncated_model.parameters():
