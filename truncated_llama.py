@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Literal
 
 def masked_kl_loss(
     logits_log_prob: torch.Tensor,
@@ -32,24 +32,60 @@ def masked_kl_loss(
         return masked_loss.sum() / logits_log_prob.size(0)
     raise ValueError(f"Invalid reduction type: {reduction}")
 
+AttnImplementation = Optional[Literal["eager", "sdpa", "flash_attention_2"]]
+
 class TruncatedLlama(nn.Module):
-    def __init__(self, model_path: str, early_exit_idx: int, use_flash_attn: bool = False, ft_last_transformer = False, ft_head = False, lm_head_random_init = True):
+    def __init__(
+        self,
+        model_path: str,
+        early_exit_idx: int,
+        *,
+        reference_model: Optional[nn.Module] = None,
+        attn_implementation: AttnImplementation = None,
+        torch_dtype: Optional[torch.dtype] = None,
+        low_cpu_mem_usage: bool = True,
+        use_cache: bool = False,
+        use_flash_attn: bool = False,
+        ft_last_transformer: bool = False,
+        ft_head: bool = False,
+        lm_head_random_init: bool = True,
+    ):
         super().__init__()
-        # Load reference model (always kept frozen)
-        if use_flash_attn:
-            self.reference_model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
-        else:
-            self.reference_model = AutoModelForCausalLM.from_pretrained(model_path)
+        if attn_implementation is None and use_flash_attn:
+            attn_implementation = "flash_attention_2"
+
+        from_pretrained_kwargs = {}
+        if attn_implementation is not None:
+            from_pretrained_kwargs["attn_implementation"] = attn_implementation
+        if torch_dtype is not None:
+            # transformers >= 4.57 prefers `dtype` over `torch_dtype` (deprecated)
+            from_pretrained_kwargs["dtype"] = torch_dtype
+        from_pretrained_kwargs["low_cpu_mem_usage"] = low_cpu_mem_usage
+
+        def _load_model():
+            try:
+                return AutoModelForCausalLM.from_pretrained(model_path, **from_pretrained_kwargs)
+            except TypeError:
+                if "dtype" in from_pretrained_kwargs:
+                    fallback_kwargs = dict(from_pretrained_kwargs)
+                    fallback_kwargs["torch_dtype"] = fallback_kwargs.pop("dtype")
+                    return AutoModelForCausalLM.from_pretrained(model_path, **fallback_kwargs)
+                raise
+
+        # Load / attach reference model (always kept frozen)
+        self.reference_model = _load_model() if reference_model is None else reference_model
 
         # Freeze reference model
         for param in self.reference_model.parameters():
             param.requires_grad = False
+        self.reference_model.eval()
+        if hasattr(self.reference_model, "config"):
+            self.reference_model.config.use_cache = bool(use_cache)
             
         # Load truncated model (for early exit)
-        if use_flash_attn:
-            self.truncated_model = AutoModelForCausalLM.from_pretrained(model_path, attn_implementation="flash_attention_2")
-        else:
-            self.truncated_model = AutoModelForCausalLM.from_pretrained(model_path)
+        self.truncated_model = _load_model()
+        if hasattr(self.truncated_model, "config"):
+            self.truncated_model.config.use_cache = bool(use_cache)
 
         if not (hasattr(self.truncated_model, "model") and hasattr(self.truncated_model.model, "layers") and hasattr(self.truncated_model, "lm_head")):
             raise TypeError(
@@ -63,6 +99,8 @@ class TruncatedLlama(nn.Module):
             
         # We'll only keep layers up to early_exit_idx in the truncated model
         self.early_exit_idx = early_exit_idx
+        self.ft_last_transformer = bool(ft_last_transformer)
+        self.ft_head = bool(ft_head)
         
         # Actually truncate the model by keeping only layers up to early_exit_idx
         # Store a reference to the last layer for potential fine-tuning
@@ -102,16 +140,31 @@ class TruncatedLlama(nn.Module):
         keep_og_logits: bool = False,
         kl_temperature: float = 1.0,
     ):
-        # Process with reference model when needed
+        # Teacher pass (reference model) when needed.
         og_lm_logits = None
-        if loss_type == "kl_divergence" or keep_og_logits:
-            with torch.no_grad():
-                ref_outputs = self.reference_model(input_ids, attention_mask=attention_mask)
-                og_lm_logits = ref_outputs.logits
+        og_log_prob = None
+        if loss_type in ("kl_divergence", "combined") or keep_og_logits:
+            with torch.inference_mode():
+                ref_logits = self.reference_model(input_ids, attention_mask=attention_mask, use_cache=False).logits
+            if keep_og_logits:
+                og_lm_logits = ref_logits
+            if loss_type in ("kl_divergence", "combined"):
+                og_log_prob = F.log_softmax(ref_logits / kl_temperature, dim=-1)
         
         # Process with truncated model for early exit
-        # Since we've actually truncated the model's layers, we can use the model directly
-        logits = self.truncated_model(input_ids, attention_mask=attention_mask).logits
+        # If we are only tuning the LM head, avoid tracking grads through the frozen transformer
+        # to reduce activation memory.
+        if not self.ft_last_transformer:
+            with torch.no_grad():
+                hidden_states = self.truncated_model.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                ).last_hidden_state
+            logits = self.truncated_model.lm_head(hidden_states)
+        else:
+            # Since we've actually truncated the model's layers, we can use the model directly.
+            logits = self.truncated_model(input_ids, attention_mask=attention_mask, use_cache=False).logits
         
         # Calculate loss if needed
         loss = None
@@ -119,18 +172,15 @@ class TruncatedLlama(nn.Module):
             assert labels is not None
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
         elif loss_type == "kl_divergence":
+            assert og_log_prob is not None
             logits_log_prob = F.log_softmax(logits / kl_temperature, dim=-1)
-            og_log_prob = F.log_softmax(og_lm_logits / kl_temperature, dim=-1)
             kl_mask = self._shift_attention_mask(attention_mask)
             loss = (kl_temperature**2) * masked_kl_loss(logits_log_prob, og_log_prob, kl_mask, reduction="tokenmean")
         elif loss_type == "combined":
             assert labels is not None
-            with torch.no_grad():
-                ref_outputs = self.reference_model(input_ids, attention_mask=attention_mask)
-                og_lm_logits = ref_outputs.logits
+            assert og_log_prob is not None
             ce_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1))
             logits_log_prob = F.log_softmax(logits / kl_temperature, dim=-1)
-            og_log_prob = F.log_softmax(og_lm_logits / kl_temperature, dim=-1)
             kl_mask = self._shift_attention_mask(attention_mask)
             kl_loss = (kl_temperature**2) * masked_kl_loss(logits_log_prob, og_log_prob, kl_mask, reduction="tokenmean")
             loss = ce_loss + kl_loss
@@ -138,7 +188,7 @@ class TruncatedLlama(nn.Module):
         return {
             "loss": loss,
             "logits": logits,
-            "og_lm_logits": og_lm_logits if (keep_og_logits or loss_type == "kl_divergence") else None,
+            "og_lm_logits": og_lm_logits if keep_og_logits else None,
         }
     
     def load_from_checkpoint(self, lm_head, last_transformer):

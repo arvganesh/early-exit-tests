@@ -11,10 +11,13 @@ def tokenize_sharegpt_examples(example, tokenizer, max_length):
     conversation = ""
     for turn, content in zip(example["conversations"]["from"], example["conversations"]["value"]):
         conversation += f"{turn}: {content}\n"
-        if len(conversation) > max_length:
-            conversation = conversation[:max_length]
-            break
-    outputs = tokenizer(text=conversation, padding=False)
+    outputs = tokenizer(
+        text=conversation,
+        padding=False,
+        truncation=True,
+        max_length=max_length,
+        return_tensors=None,
+    )
     return outputs
 
 def create_sharegpt_train_test_val(train_size=0.8, test_size=0.1, seed=0):
@@ -40,6 +43,7 @@ def get_sharegpt_dataloaders(
     generate_labels=True,
     nice_shape=True,
     *,
+    filter_non_english: bool = True,
     num_workers: int = 0,
     pin_memory: bool = False,
     persistent_workers: bool = False,
@@ -51,10 +55,11 @@ def get_sharegpt_dataloaders(
     def tokenizer_wrapper(example):
         return tokenize_sharegpt_examples(example, tokenizer, max_length)
 
-    # Remove non english items.
-    train = train.filter(lambda x: is_english(x["conversations"]["value"][0]))
-    val = val.filter(lambda x: is_english(x["conversations"]["value"][0]))
-    test = test.filter(lambda x: is_english(x["conversations"]["value"][0]))
+    # Optional (slow) language filtering.
+    if filter_non_english:
+        train = train.filter(lambda x: is_english(x["conversations"]["value"][0]))
+        val = val.filter(lambda x: is_english(x["conversations"]["value"][0]))
+        test = test.filter(lambda x: is_english(x["conversations"]["value"][0]))
     train = train.map(tokenizer_wrapper, batched=False)
     test = test.map(tokenizer_wrapper, batched=False)
     val = val.map(tokenizer_wrapper, batched=False)

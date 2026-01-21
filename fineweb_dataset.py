@@ -50,7 +50,7 @@ def get_fineweb_dataloaders(
         tokenize_function,
         batched=True,
         batch_size=256,
-        remove_columns=["text", "url", "date"],
+        remove_columns=getattr(dataset, "column_names", ["text"]),
     )
 
     # Keep val/test small and cheap: avoid skipping millions of rows.

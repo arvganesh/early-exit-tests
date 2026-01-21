@@ -7,6 +7,11 @@ This repo contains the code used in my investigation of "self-speculation", a va
 - Using the following [NGC container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags): `nvcr.io/nvidia/pytorch:25.01-py3`
 - GPU: NVIDIA GH200 120 GB
 
+## Training Performance Notes
+
+- `train.py` now supports `--attn_implementation {auto,sdpa,flash_attention_2}`, `--torch_dtype {auto,bf16,fp16,fp32}`, `--tf32/--no_tf32`, and optional `--torch_compile`.
+- To run in the background with a log file (tmux if available, else nohup): `./launch_train_bg.sh <session_name> python train.py ...`
+
 ## Repository File Structure
 
 This repository contains various scripts for training and evaluating models, handling datasets, and utilities for working with LLaMA-based models.
