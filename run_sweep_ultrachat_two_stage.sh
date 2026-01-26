@@ -16,12 +16,14 @@ MAX_STEPS_HEAD="${MAX_STEPS_HEAD:-200}"
 BATCH_SIZE_HEAD="${BATCH_SIZE_HEAD:-4}"
 GRAD_ACCUM_HEAD="${GRAD_ACCUM_HEAD:-4}"
 LR_HEAD="${LR_HEAD:-2e-5}"
+LR_SCHEDULE_HEAD="${LR_SCHEDULE_HEAD:-linear}"
 
 # Stage 2 (head + last block)
 MAX_STEPS_FTLAST="${MAX_STEPS_FTLAST:-200}"
 BATCH_SIZE_FTLAST="${BATCH_SIZE_FTLAST:-4}"
 GRAD_ACCUM_FTLAST="${GRAD_ACCUM_FTLAST:-4}"
 LR_FTLAST="${LR_FTLAST:-2e-5}"
+LR_SCHEDULE_FTLAST="${LR_SCHEDULE_FTLAST:-linear}"
 
 WARMUP_RATIO="${WARMUP_RATIO:-0.1}"
 MAX_LENGTH="${MAX_LENGTH:-4096}"
@@ -52,7 +54,11 @@ RUN_TYPE_BASE="${RUN_TYPE_BASE:-sweep_ultrachat_${TS}}"
 RUN_TYPE_HEAD="${RUN_TYPE_HEAD:-${RUN_TYPE_BASE}_head}"
 RUN_TYPE_FTLAST="${RUN_TYPE_FTLAST:-${RUN_TYPE_BASE}_ftlast}"
 
-MODEL_FOLDER="${MODEL_PATH#*/}"
+if [[ "${MODEL_PATH}" == */* ]]; then
+  MODEL_FOLDER="$(basename "${MODEL_PATH}")"
+else
+  MODEL_FOLDER="${MODEL_PATH#*/}"
+fi
 
 LAYERS_STR="${LAYERS:-"3 7 11"}"
 read -r -a LAYERS <<< "${LAYERS_STR}"
@@ -62,6 +68,8 @@ echo "Layers: ${LAYERS[*]}"
 echo "Stage1 run_type: ${RUN_TYPE_HEAD}"
 echo "Stage2 run_type: ${RUN_TYPE_FTLAST}"
 echo "W&B project: ${WANDB_PROJECT}"
+echo "Stage1 lr_schedule: ${LR_SCHEDULE_HEAD} (warmup ${WARMUP_RATIO})"
+echo "Stage2 lr_schedule: ${LR_SCHEDULE_FTLAST} (warmup ${WARMUP_RATIO})"
 
 for L in "${LAYERS[@]}"; do
   echo "=== [Stage1 head-only] target_layer=${L} ==="
@@ -76,6 +84,7 @@ for L in "${LAYERS[@]}"; do
     --grad_accumulate_steps "${GRAD_ACCUM_HEAD}" \
     --max_steps "${MAX_STEPS_HEAD}" \
     --learning_rate "${LR_HEAD}" \
+    --lr_schedule "${LR_SCHEDULE_HEAD}" \
     --save_every_steps "${SAVE_EVERY}" \
     --eval_every_steps "${EVAL_EVERY}" \
     --eval_max_batches "${EVAL_MAX_BATCHES}" \
@@ -118,6 +127,7 @@ for L in "${LAYERS[@]}"; do
     --grad_accumulate_steps "${GRAD_ACCUM_FTLAST}" \
     --max_steps "${MAX_STEPS_FTLAST}" \
     --learning_rate "${LR_FTLAST}" \
+    --lr_schedule "${LR_SCHEDULE_FTLAST}" \
     --save_every_steps "${SAVE_EVERY}" \
     --eval_every_steps "${EVAL_EVERY}" \
     --eval_max_batches "${EVAL_MAX_BATCHES}" \
@@ -182,4 +192,3 @@ python evaluate_checkpoints.py \
 echo "Done."
 echo "Stage1 eval: ${OUT_DIR_HEAD}"
 echo "Stage2 eval: ${OUT_DIR_FTLAST}"
-

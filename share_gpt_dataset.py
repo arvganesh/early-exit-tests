@@ -5,7 +5,14 @@ ShareGPT specific helper functions.
 from data_utils import custom_collate_fn
 from datasets import load_dataset
 from torch.utils.data import DataLoader
-from langdetect import detect, LangDetectException
+try:
+    # Optional dependency: only needed when `filter_non_english=True`.
+    from langdetect import detect, LangDetectException  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    detect = None
+
+    class LangDetectException(Exception):
+        pass
 
 def tokenize_sharegpt_examples(example, tokenizer, max_length):
     conversation = ""
@@ -57,6 +64,11 @@ def get_sharegpt_dataloaders(
 
     # Optional (slow) language filtering.
     if filter_non_english:
+        if detect is None:
+            raise ModuleNotFoundError(
+                "langdetect is required for ShareGPT language filtering. "
+                "Install it or pass filter_non_english=False / --no_sharegpt_filter_non_english."
+            )
         train = train.filter(lambda x: is_english(x["conversations"]["value"][0]))
         val = val.filter(lambda x: is_english(x["conversations"]["value"][0]))
         test = test.filter(lambda x: is_english(x["conversations"]["value"][0]))
@@ -99,6 +111,9 @@ def get_sharegpt_dataloaders(
 
 def is_english(text):
     """Return True if the detected language of the text is English."""
+    if detect is None:
+        # Should only happen if called while langdetect is missing; callers should gate on it.
+        return True
     try:
         return detect(text) == 'en'
     except LangDetectException:

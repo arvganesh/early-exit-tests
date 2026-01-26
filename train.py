@@ -484,13 +484,14 @@ args.notes += f"\nDataset: {DATASET_DESC}"
 
 # Initialize wandb before data loading.
 if args.wandb:
+    wandb_mode = os.environ.get("WANDB_MODE", "online")
     wandb.init(
         project=args.wandb_project,
         name=run_name.replace("/", "__"),
         group=args.run_type,
         job_type=f"layer{args.target_layer}",
         config=vars(args),
-        mode="online",
+        mode=wandb_mode,
         notes=args.notes,
     )
 
