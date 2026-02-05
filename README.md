@@ -41,36 +41,6 @@ This repository contains various scripts for training and evaluating models, han
 - **`scratch_work.py`** – Temporary or experimental code snippets.
 
 ## Findings
-coming soon!
-
-####
-Clarifiying Questions:
-  - Is the “another model” teacher always the same base model at full depth (self-distill), or do you want
-    teacher_model_path to be different (bigger/different checkpoint)?
-  - Do you intend to fine-tune only the moved head, or also add a learned “exit norm” / small adapter before
-    the head? (Right now you’re effectively applying the final RMSNorm at the early layer, frozen.)
-  - For speculative decoding, are you targeting HF generate-style KV-cached decoding, or are you OK with a
-    custom cached loop?
-  - What sampling regime matters for your experiments (temp=0 greedy vs temp>0 multinomial), and do you care
-    about matching the exact sampled distribution or just improving accept rate?
-  - What’s your main metric: wall-clock speed on GH200, acceptance rate vs layer, perplexity vs layer, or
-    some quality metric on downstream prompts?
-
-Metrics To Report:
-
-A practical, report-friendly grid (small but meaningful):
-  - Fix top_p=0.95, top_k=0
-  - Temperatures: T ∈ {0.7, 1.0} (or {0.8, 1.0})
-  - Gammas: γ ∈ {2, 4, 8, 16} (often you’ll find 4–8 best)
-
-What to report:
-  - Core metric plots vs exit layer at one policy + one γ:
-      - avg_accepted (accepted draft tokens per target call)
-      - avg_overlap or avg_tv (distribution closeness; policy-dependent)
-  - Ablation: tokens/sec (or avg_accepted) vs γ for 2–3 representative exit layers (early/mid/late), at the
-    same T/top_p.
-
-
 1/24 Log:
 
 • Here’s where we are (chat + production-like eval = temp=0.7, top_p=0.95, UltraChat prompts), and what it implies.
@@ -95,6 +65,4 @@ What to report:
       - Stage 2 (head + last block): init from stage-1 checkpoint, LR smaller (e.g. 2e-5), similar steps.
   - Use existing driver: early-exit-tests/run_sweep_ultrachat_two_stage.sh:1 with env overrides, e.g.
     LAYERS="11 13" MAX_STEPS_HEAD=5000 LR_HEAD=5e-5 MAX_STEPS_FTLAST=5000 LR_FTLAST=2e-5 SPEC_T=0.7 SPEC_TOP_P=0.95 ./run_sweep_ultrachat_two_stage.sh
-
-  If you want, I can kick off that two-stage run (and then re-run the same evaluate_checkpoints.py protocol with more prompts, e.g. --spec_num_prompts 64).
 
