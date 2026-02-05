@@ -1,5 +1,6 @@
 import torch
 import os
+import glob
 import torch.nn.functional as F
 import argparse
 import json
@@ -232,6 +233,20 @@ model_paths = []
 #model_paths.append(find_model_path(2 * args.target_layer))     
 #model_paths.append(find_model_path(2 * args.target_layer + 1))     
 model_paths.append(find_model_path(args.target_layer))
+
+model_paths = []
+
+for run in run_names:
+  folder = os.path.join(base_path, run, "model_15000*")
+  matches = glob.glob(folder)
+  if matches:
+    model_paths.append(matches[0])
+  else:
+    assert False
+
+assert(len(model_paths) == len(run_names))
+
+print(model_paths)
 
 agreement_stats_all = {}
 

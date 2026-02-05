@@ -34,6 +34,27 @@ def masked_kl_loss(
 
 AttnImplementation = Optional[Literal["eager", "sdpa", "flash_attention_2"]]
 
+def masked_kl_loss(logits_log_prob, og_log_prob, kl_loss_mask):
+    # Apply loss mask (attention mask => B, T)
+    # Define a KLDivLoss function without reduction to get elementwise losses.
+    kl_loss_fct = torch.nn.KLDivLoss(reduction='none', log_target=True)
+
+    # Compute the per-element loss (B, T, V)
+    loss_tensor = kl_loss_fct(logits_log_prob, og_log_prob)
+
+    # Sum over the vocabulary dimension to get a per-token loss (B, T)
+    loss_per_token = loss_tensor.sum(dim=-1)
+
+    # Apply the attention mask.
+    # (Convert the mask to float so that 0's zero out the loss and 1's leave it unchanged.)
+    mask = kl_loss_mask.float()
+    masked_loss = loss_per_token * mask
+
+    # Normalize by batch size (B) to match "batchmean" behavior.
+    batch_size = logits_log_prob.size(0)
+    loss = masked_loss.sum() / batch_size
+    return loss
+
 class TruncatedLlama(nn.Module):
     def __init__(
         self,

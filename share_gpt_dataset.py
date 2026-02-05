@@ -14,8 +14,21 @@ except ModuleNotFoundError:  # pragma: no cover
     class LangDetectException(Exception):
         pass
 
+#def tokenize_sharegpt_examples(example, tokenizer, max_length):
+#    conversation = ""
+#    for turn, content in zip(example["conversations"]["from"], example["conversations"]["value"]):
+#        conversation += f"{turn}: {content}\n"
+#        if len(conversation) > max_length:
+#            conversation = conversation[:max_length]
+#            break
+#    outputs = tokenizer(text=conversation, padding=False)
+#    return outputs
+
 def tokenize_sharegpt_examples(example, tokenizer, max_length):
-    conversation = ""
+    input_ids = []
+    loss_mask = []
+    attn_mask = []
+
     for turn, content in zip(example["conversations"]["from"], example["conversations"]["value"]):
         conversation += f"{turn}: {content}\n"
     outputs = tokenizer(
@@ -76,9 +89,12 @@ def get_sharegpt_dataloaders(
     test = test.map(tokenizer_wrapper, batched=False)
     val = val.map(tokenizer_wrapper, batched=False)
 
-    train.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    test.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    val.set_format(type="torch", columns=["input_ids", "attention_mask"])
+    print(test)
+
+    cols = ["input_ids", "attention_mask", "loss_mask"]
+    train.set_format(type="torch", columns=cols)
+    test.set_format(type="torch", columns=cols)
+    val.set_format(type="torch", columns=cols)
 
     loader_kwargs = dict(
         batch_size=batch_size,
