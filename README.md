@@ -38,7 +38,6 @@ This repository contains various scripts for training and evaluating models, han
 #### 🔹 Miscellaneous
 - **`README.md`** – Documentation for the repository.
 - **`benchmark_torch_compile.py`** – Benchmarking PyTorch compilation performance as applied to HuggingFace LLMs and early-exiting variants.
-- **`scratch_work.py`** – Temporary or experimental code snippets.
 
 ## Findings
 Evaluated on UltraChat prompts with chat-style decoding (temp=0.7, top_p=0.95):
