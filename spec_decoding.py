@@ -5,8 +5,8 @@ import random
 import numpy
 import time
 from truncated_llama import TruncatedLlama
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
-from transformers import get_linear_schedule_with_warmup
+from sampling_utils import sampling_probs_from_logits, safe_normalize
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from share_gpt_dataset import get_sharegpt_dataloaders
 from data_utils import get_toy_dataloaders
 
@@ -28,6 +28,18 @@ parser.add_argument(
     type=float,
     default=1.0,
     help="Temperature value for softmax."
+)
+parser.add_argument(
+    "--top_p",
+    type=float,
+    default=1.0,
+    help="Nucleus sampling p (1.0 disables).",
+)
+parser.add_argument(
+    "--top_k",
+    type=int,
+    default=0,
+    help="Top-k sampling (0 disables).",
 )
 parser.add_argument(
     "--max_length",
@@ -71,6 +83,7 @@ parser.add_argument(
     type=int
 )
 args = parser.parse_args()
+use_cuda = args.device.startswith("cuda") and torch.cuda.is_available()
 
 def set_seeds():
     torch.manual_seed(args.seed)
@@ -96,6 +109,9 @@ def temperature_softmax(logits, temp=1.0):
     logits /= temp
     return torch.softmax(logits, dim=-1)
 
+def _safe_normalize(dist: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    return safe_normalize(dist, eps=eps)
+
 # evaluate average perplexity over test dataset
 # Get data tensors, move to device.
 with torch.no_grad():
@@ -109,10 +125,16 @@ with torch.no_grad():
         for _ in range(args.num_vanilla_tok):
             target_out = target_model(input_ids)
             target_logits = target_out.logits[:, -1, :]
-            target_probs = temperature_softmax(target_logits, temp=args.softmax_temperature)
+            target_probs = sampling_probs_from_logits(
+                target_logits,
+                temperature=args.softmax_temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+            )
             sample = torch.multinomial(target_probs, 1)
             input_ids = torch.cat((input_ids, sample), dim=-1)
-        torch.cuda.synchronize()
+        if use_cuda:
+            torch.cuda.synchronize()
         end = time.time()
         print(" --- Vanilla Decoding ---- ")
         print(f"Tokens per second: { args.num_vanilla_tok / (end - start):.4f}")
@@ -130,46 +152,81 @@ with torch.no_grad():
         for num_iters in range(args.num_iters):
             # Get draft tokens
             input_length = prompt_len + num_tokens_generated
+            draft_logits_list = []
+            draft_tokens_list = []
             for i in range(args.speculate_len):
-                draft_out = draft_model(input_ids, attention_mask=attn_mask) 
-                logits = draft_out.logits[:, input_length + i - 1, :]
-                probs = temperature_softmax(logits, temp=args.softmax_temperature)
+                draft_out = draft_model(input_ids, attention_mask=attn_mask)
+                logits = draft_out.logits[:, input_length + i - 1, :]  # predicts token at position input_length + i
+                probs = sampling_probs_from_logits(
+                    logits,
+                    temperature=args.softmax_temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                )
                 sample = torch.multinomial(probs, 1)
+                draft_logits_list.append(logits)
+                draft_tokens_list.append(sample)
                 input_ids[:, input_length + i] = sample.item()
                 attn_mask[:, input_length + i] = 1
            
             # Verify with target.
             target_out = target_model(input_ids, attention_mask=attn_mask)
-            target_probs = temperature_softmax(target_out.logits, temp=args.softmax_temperature)
-            draft_probs = temperature_softmax(draft_out.logits, temp=args.softmax_temperature) 
+            target_probs = sampling_probs_from_logits(
+                target_out.logits,
+                temperature=args.softmax_temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+            )
+            overlap_sum = 0.0
             
             # Find disagreement point.
             agree_length = 0
-            randoms = torch.rand(args.speculate_len).to(args.device)
-            likelihood = target_probs / draft_probs
-            speculated_idxs = input_ids[:, input_length : input_length + args.speculate_len]
-            speculated_likelihoods = likelihood[:, torch.arange(input_length - 1, input_length - 1 + args.speculate_len), speculated_idxs]
-            agreements = speculated_likelihoods > randoms
             for i in range(args.speculate_len):
-                if not agreements[:, :, i]:
-                    break
-                agree_length += 1
+                pred_idx = input_length + i - 1
+                tok = draft_tokens_list[i]  # (1,1)
+                p = target_probs[:, pred_idx, :]  # (1,V)
+                q = sampling_probs_from_logits(
+                    draft_logits_list[i],
+                    temperature=args.softmax_temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                )
+                overlap_sum += torch.minimum(p, q).sum().item()
+                p_tok = p.gather(-1, tok)
+                q_tok = q.gather(-1, tok).clamp_min(1e-12)
+                accept_prob = torch.minimum(torch.ones_like(p_tok), p_tok / q_tok)
+                u = torch.rand_like(accept_prob)
+                if (u < accept_prob).all():
+                    agree_length += 1
+                    continue
+                break
                
             # Fix the disagreed upon sample if needed.
             disagree_idx = input_length + agree_length 
             if agree_length < args.speculate_len:
-                target_dist = target_probs[:, disagree_idx - 1]
-                draft_dist = draft_probs[:, disagree_idx - 1]
-                fix_dist = torch.clamp(target_dist - draft_dist, min=0)
-                fix_dist /= fix_dist.sum()
+                pred_idx = disagree_idx - 1
+                target_dist = target_probs[:, pred_idx, :]
+                draft_dist = sampling_probs_from_logits(
+                    draft_logits_list[agree_length],
+                    temperature=args.softmax_temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                )
+                fix_dist = torch.clamp(target_dist - draft_dist, min=0.0)
+                fix_dist = _safe_normalize(fix_dist)
+                if not torch.isfinite(fix_dist).all() or fix_dist.sum().item() == 0.0:
+                    fix_dist = target_dist
                 new_token = torch.multinomial(fix_dist, 1)
             else:
                 new_token = torch.multinomial(target_probs[:, -1, :], 1)
 
             input_ids[:, disagree_idx] = new_token
             num_tokens_generated += agree_length + 1
+            if args.speculate_len > 0:
+                print(f"iter={num_iters} accepted={agree_length}/{args.speculate_len} overlap={overlap_sum / args.speculate_len:.4f}")
             
-        torch.cuda.synchronize()
+        if use_cuda:
+            torch.cuda.synchronize()
         end = time.time()
         generation_time = end - start
         print(" --- Speculative Decoding ---- ")

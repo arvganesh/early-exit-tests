@@ -40,21 +40,14 @@ def custom_collate_fn(batch, tokenizer, generate_labels=True, nice_shape=True):
         pad_mask = torch.zeros(len(batch), 1)
         attention_mask = torch.cat((attention_mask, pad_mask), dim=1)
 
-    if "loss_mask" in batch[0]:
-        loss_mask = torch.stack([F.pad(elem["loss_mask"],
-            (0, batch_length - len(elem["loss_mask"])),
-            mode="constant",
-            value=0) for elem in batch], dim=0)
-
-        loss_mask = loss_mask[:, 1:]
-        pad_mask = torch.zeros(len(batch), 1)
-        loss_mask = torch.cat((loss_mask, pad_mask), dim=1)
+    pad_tokens = torch.full((len(batch), 1), tokenizer.pad_token_id, dtype=input_ids.dtype)
 
     if generate_labels:
-        pad_tokens = torch.full((len(batch), 1), tokenizer.pad_token_id)
-        labels = input_ids.clone()[:, 1:] # Remove first token from labels.
-        labels = torch.cat((labels, pad_tokens), dim=1) # Add another padding token
-        labels = labels.masked_fill(attention_mask == 0, -100)
+        labels = torch.cat((input_ids[:, 1:], pad_tokens), dim=1)
+        shift_mask = torch.zeros_like(attention_mask)
+        if attention_mask.size(1) > 1:
+            shift_mask[:, :-1] = attention_mask[:, 1:]
+        labels = labels.masked_fill(shift_mask == 0, -100)
         assert labels.shape == input_ids.shape
 
     return {
@@ -95,7 +88,18 @@ def tokenize_sharegpt_examples(example, tokenizer, max_length):
     example = {"input_ids": input_ids, "loss_mask": loss_mask, "attention_mask": attn_mask}
     return example
 
-def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = True, nice_shape = True):
+def get_toy_dataloaders(
+    batch_size,
+    tokenizer,
+    max_length,
+    generate_labels=True,
+    nice_shape=True,
+    *,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int = 2,
+):
     dataset = [
             {
                 "conversations": {
@@ -290,12 +294,36 @@ def get_toy_dataloaders(batch_size, tokenizer, max_length, generate_labels = Tru
     test_set = list(map(tokenizer_wrapper, dataset[10:15]))
     val_set = list(map(tokenizer_wrapper, dataset[15:]))
 
-    train_set = list(map(convert_to_tensor, train_set))
-    test_set = list(map(convert_to_tensor, test_set))
-    val_set = list(map(convert_to_tensor, val_set))
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["prefetch_factor"] = prefetch_factor
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
-    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, collate_fn=lambda batch: custom_collate_fn(batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape))
+    train_loader = DataLoader(
+        train_set,
+        collate_fn=lambda batch: custom_collate_fn(
+            batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape
+        ),
+        **loader_kwargs,
+    )
+    test_loader = DataLoader(
+        test_set,
+        collate_fn=lambda batch: custom_collate_fn(
+            batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape
+        ),
+        **loader_kwargs,
+    )
+    val_loader = DataLoader(
+        val_set,
+        collate_fn=lambda batch: custom_collate_fn(
+            batch, tokenizer, generate_labels=generate_labels, nice_shape=nice_shape
+        ),
+        **loader_kwargs,
+    )
 
     return train_loader, test_loader, val_loader

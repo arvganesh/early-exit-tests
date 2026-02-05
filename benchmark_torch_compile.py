@@ -63,7 +63,8 @@ with torch.no_grad():
         # Do forward pass.
         start = time.time()
         outputs = truth_model(input_toks, attention_mask=attn_mask)
-        torch.cuda.synchronize()
+        if device.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize()
         end = time.time() 
         data.append(end - start)
         total_time += end - start
