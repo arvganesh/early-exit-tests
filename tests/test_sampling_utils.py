@@ -1,6 +1,6 @@
 import torch
 
-from sampling_utils import sampling_probs_from_logits
+from utils.sampling import sampling_probs_from_logits
 
 
 def test_sampling_probs_normalized_and_nonnegative():

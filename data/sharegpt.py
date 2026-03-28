@@ -2,7 +2,7 @@
 ShareGPT specific helper functions.
 """
 
-from data_utils import custom_collate_fn
+from data.utils import custom_collate_fn
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 try:

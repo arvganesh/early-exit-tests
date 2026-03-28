@@ -4,11 +4,11 @@ import argparse
 import random
 import numpy
 import time
-from truncated_llama import TruncatedLlama
-from sampling_utils import sampling_probs_from_logits, safe_normalize
+from models.truncated_llama import TruncatedLlama
+from utils.sampling import sampling_probs_from_logits, safe_normalize
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from share_gpt_dataset import get_sharegpt_dataloaders
-from data_utils import get_toy_dataloaders
+from data.sharegpt import get_sharegpt_dataloaders
+from data.utils import get_toy_dataloaders
 
 parser = argparse.ArgumentParser(description="Evaluate the average agreement length between baseline and tuned models.")
 parser.add_argument(

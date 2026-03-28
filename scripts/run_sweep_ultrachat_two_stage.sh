@@ -148,7 +148,7 @@ done
 echo "=== Evaluating Stage1 checkpoints ==="
 CKPT_GLOB_HEAD="${OUTPUT_DIR}/${MODEL_FOLDER}/${RUN_TYPE_HEAD}/layer*/model_*.pt"
 OUT_DIR_HEAD="${EVAL_DIR}/${RUN_TYPE_HEAD}"
-python evaluate_checkpoints.py \
+python eval/evaluate_checkpoints.py \
   --model_path "${MODEL_PATH}" \
   --checkpoint_glob "${CKPT_GLOB_HEAD}" \
   --out_dir "${OUT_DIR_HEAD}" \
@@ -170,7 +170,7 @@ python evaluate_checkpoints.py \
 echo "=== Evaluating Stage2 checkpoints ==="
 CKPT_GLOB_FTLAST="${OUTPUT_DIR}/${MODEL_FOLDER}/${RUN_TYPE_FTLAST}/layer*/model_*.pt"
 OUT_DIR_FTLAST="${EVAL_DIR}/${RUN_TYPE_FTLAST}"
-python evaluate_checkpoints.py \
+python eval/evaluate_checkpoints.py \
   --model_path "${MODEL_PATH}" \
   --checkpoint_glob "${CKPT_GLOB_FTLAST}" \
   --out_dir "${OUT_DIR_FTLAST}" \

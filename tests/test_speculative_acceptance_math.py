@@ -1,6 +1,6 @@
 import torch
 
-from sampling_utils import sampling_probs_from_logits
+from utils.sampling import sampling_probs_from_logits
 
 
 def tv_distance(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:

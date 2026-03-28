@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from truncated_llama import masked_kl_loss
+from models.truncated_llama import masked_kl_loss
 
 
 def test_masked_kl_loss_ignores_appended_padding():

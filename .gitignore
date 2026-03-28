@@ -154,8 +154,10 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# Model Weights
-models/
+# Model Weights (checkpoints, not source code)
+*.pt
+*.bin
+*.safetensors
 
 # Weights and Biases
 wandb/

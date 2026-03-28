@@ -11,8 +11,8 @@ import math
 import torch
 import torch.nn.functional as F
 
-from sampling_utils import sampling_probs_from_logits
-from truncated_llama import masked_kl_loss
+from utils.sampling import sampling_probs_from_logits
+from models.truncated_llama import masked_kl_loss
 
 
 def tv_distance(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:

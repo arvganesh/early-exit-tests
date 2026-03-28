@@ -3,11 +3,11 @@ import torch.nn.functional as F
 import argparse
 import random
 import numpy
-from truncated_llama import TruncatedLlama
+from models.truncated_llama import TruncatedLlama
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer, DataCollatorForLanguageModeling
 from transformers import get_linear_schedule_with_warmup
-from share_gpt_dataset import get_sharegpt_dataloaders
-from data_utils import get_toy_dataloaders
+from data.sharegpt import get_sharegpt_dataloaders
+from data.utils import get_toy_dataloaders
 
 parser = argparse.ArgumentParser(description="Evaluate the perplexity of trained vs. baseline models.")
 parser = argparse.ArgumentParser(description="Train a truncated Llama model with a tuned head.")

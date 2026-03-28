@@ -12,7 +12,7 @@ from transformers import (
     get_cosine_schedule_with_warmup,
 )
 from datasets import load_dataset
-from data_utils import custom_collate_fn
+from data.utils import custom_collate_fn
 import wandb
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Literal
@@ -25,11 +25,11 @@ import sys
 from datetime import datetime
 import contextlib
 
-from truncated_llama import TruncatedLlama
-from share_gpt_dataset import get_sharegpt_dataloaders
-from fineweb_dataset import get_fineweb_dataloaders
-from ultrachat_dataset import get_ultrachat_dataloaders
-from data_utils import get_toy_dataloaders
+from models.truncated_llama import TruncatedLlama
+from data.sharegpt import get_sharegpt_dataloaders
+from data.fineweb import get_fineweb_dataloaders
+from data.ultrachat import get_ultrachat_dataloaders
+from data.utils import get_toy_dataloaders
 parser = argparse.ArgumentParser(description="Train a truncated Llama model with a tuned head.")
 parser.add_argument(
     "--model_path",

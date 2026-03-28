@@ -20,7 +20,7 @@ GITHUB_REPO=$SCRATCH/early-exit-tests
 
 module load tacc-apptainer
 singularity exec -H $SCRATCH/tmp_home --nv $SCRATCH/pytorch_25.01-py3.sif \
-python $GITHUB_REPO/evaluate_average_agreement_len.py \
+python $GITHUB_REPO/eval/evaluate_agreement.py \
 --model_path meta-llama/Llama-3.2-1B \
 --target_layer {layer} \
 --softmax_temperature {temp} \

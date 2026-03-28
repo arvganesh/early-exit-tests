@@ -13,11 +13,11 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from fineweb_dataset import get_fineweb_dataloaders
-from share_gpt_dataset import get_sharegpt_dataloaders
-from ultrachat_dataset import get_ultrachat_dataloaders
-from sampling_utils import sampling_probs_from_logits, safe_normalize
-from truncated_llama import TruncatedLlama
+from data.fineweb import get_fineweb_dataloaders
+from data.sharegpt import get_sharegpt_dataloaders
+from data.ultrachat import get_ultrachat_dataloaders
+from utils.sampling import sampling_probs_from_logits, safe_normalize
+from models.truncated_llama import TruncatedLlama
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 

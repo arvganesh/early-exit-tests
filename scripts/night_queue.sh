@@ -11,7 +11,7 @@ set -euo pipefail
 # Monitor:
 #   tail -f ./logs/night_queue_*.log
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 WAIT_PID="${WAIT_PID:-}"
 
@@ -82,14 +82,14 @@ run_exp "ultrachat_L14_const_2k_2k" \
   LAYERS="14" \
   MAX_STEPS_HEAD=2000 BATCH_SIZE_HEAD=2 GRAD_ACCUM_HEAD=8 LR_HEAD=5e-5 LR_SCHEDULE_HEAD=constant \
   MAX_STEPS_FTLAST=2000 BATCH_SIZE_FTLAST=2 GRAD_ACCUM_FTLAST=8 LR_FTLAST=2e-5 LR_SCHEDULE_FTLAST=constant \
-  bash run_sweep_ultrachat_two_stage.sh
+  bash scripts/run_sweep_ultrachat_two_stage.sh
 
 # Experiment 2: longer optimization at the best-performing mid-late exit.
 run_exp "ultrachat_L13_const_4k_4k" \
   LAYERS="13" \
   MAX_STEPS_HEAD=4000 BATCH_SIZE_HEAD=2 GRAD_ACCUM_HEAD=8 LR_HEAD=5e-5 LR_SCHEDULE_HEAD=constant \
   MAX_STEPS_FTLAST=4000 BATCH_SIZE_FTLAST=2 GRAD_ACCUM_FTLAST=8 LR_FTLAST=2e-5 LR_SCHEDULE_FTLAST=constant \
-  bash run_sweep_ultrachat_two_stage.sh
+  bash scripts/run_sweep_ultrachat_two_stage.sh
 
 log "All queued experiments finished."
 

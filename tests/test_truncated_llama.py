@@ -5,8 +5,8 @@ import argparse
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 from pprint import pprint
-from truncated_llama import TruncatedLlama, masked_kl_loss
-from data_utils import custom_collate_fn, get_toy_dataloaders
+from models.truncated_llama import TruncatedLlama, masked_kl_loss
+from data.utils import custom_collate_fn, get_toy_dataloaders
 
 parser = argparse.ArgumentParser(prog="Early Exiting Llama Testing")
 parser.add_argument("-d", "--device", type=str)

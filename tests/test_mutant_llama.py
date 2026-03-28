@@ -1,4 +1,4 @@
-from MutantLlama import MutantLlama, EarlyExitConfig, LLAMA32_CONFIG_1B, robust_copy_weights
+from models.mutant_llama import MutantLlama, EarlyExitConfig, LLAMA32_CONFIG_1B, robust_copy_weights
 from transformers import AutoModelForCausalLM
 import torch
 

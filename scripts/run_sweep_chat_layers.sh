@@ -81,7 +81,7 @@ echo "=== Evaluating checkpoints ==="
 echo "Checkpoint glob: ${CKPT_GLOB}"
 echo "Output dir: ${OUT_DIR}"
 
-python evaluate_checkpoints.py \
+python eval/evaluate_checkpoints.py \
   --model_path "${MODEL_PATH}" \
   --checkpoint_glob "${CKPT_GLOB}" \
   --out_dir "${OUT_DIR}" \

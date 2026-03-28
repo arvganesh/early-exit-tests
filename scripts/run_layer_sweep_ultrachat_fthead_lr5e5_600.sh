@@ -50,7 +50,7 @@ echo "W&B project: ${WANDB_PROJECT}"
 for layer in ${LAYERS}; do
   session="ultrachat_l${layer}_lr${LR}_s${MAX_STEPS}"
   echo "=== Launching layer=${layer} (session=${session}) ==="
-  ./launch_train_bg.sh "${session}" python train.py \
+  ./scripts/launch_train_bg.sh "${session}" python train.py \
     --dataset ultrachat \
     --model_path "${MODEL_PATH}" \
     --target_layer "${layer}" \

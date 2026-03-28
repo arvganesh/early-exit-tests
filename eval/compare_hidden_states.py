@@ -1,7 +1,7 @@
 import argparse
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from truncated_llama import TruncatedLlama
+from models.truncated_llama import TruncatedLlama
 
 
 def compare_hidden_states(model_path: str, layer_idx: int, device: str, prompt: str):
