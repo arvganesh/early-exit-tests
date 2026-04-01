@@ -18,7 +18,7 @@ Under the right conditions (reasonable acceptance rate, well-chosen draft model)
 1. Exit at an intermediate layer and fine-tune the original LM head to exit early.
 2. Exit at an intermediate layer and fine-tune both the original LM head and the preceding transformer block (more capacity).
 
-DISCLAIMER: I did not coin the term "self-speculation". It was first mentioned in [LayerSkip](https://arxiv.org/pdf/2404.16710), where they used layer dropout and a special early exit loss during pre-training to achieve ~1.3-2x speedups on various tasks with self-speculation.
+> **Note:** I did not coin the term "self-speculation". It was first mentioned in [LayerSkip](https://arxiv.org/pdf/2404.16710), where they used layer dropout and a special early exit loss during pre-training to achieve ~1.3-2x speedups on various tasks with self-speculation.
 
 ## Approach
 
