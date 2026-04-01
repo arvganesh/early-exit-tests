@@ -36,7 +36,7 @@ Evaluated on UltraChat prompts with chat-style decoding (temp=0.7, top_p=0.95):
 - Learning rate and schedule matter: the best layer-11 run used LR=5e-5 with a constant schedule, achieving ~1.49% acceptance rate and ~20.8 perplexity on UltraChat.
 - Even the best configurations averaged ~0.12 accepted draft tokens per step (gamma=8), which is too low for wall-clock speedup. However, this doesn't tell the whole story since KV caches could be shared between the draft and the target to provide further speedup.
 
-**Key takeaways:** 
+**Key takeaways:**
 - Model capacity seems to be one of the bottlenecks. After increasing LR and # of epochs trained, the model did not show improvement. However, when adding capacity in the form of unfreezing the transformer layer at the exit point, the evals improved, albeit modestly. I hypothesize that the increased capacity explains the slight improvements in acceptance rate and perplexity.
 - However, my intuition also tells me that weight initialization used for the transformer block fine-tuning was sub-optimal (weights from the original model were unfrozen and then fine-tuned). One problem I see is that the layer $L$ was trained to expect inputs from layer $L-1$ and output to layer $L+1$. This is quite an "opinionated" initialization and differs greatly from what we *want* it to learn, which is to approximate the function represented by transformer layers $L + 1 ... N$. Similar to how resnets are trained, in hindsight, initializing the weights to be the identity seems more reasonable.
 
@@ -80,6 +80,7 @@ Evaluated on UltraChat prompts with chat-style decoding (temp=0.7, top_p=0.95):
 - Chen et al., [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/abs/2302.01318) (2023) — independent and concurrent formulation of speculative decoding from DeepMind.
 - Elhoushi et al., [LayerSkip: Enabling Early Exit Inference and Self-Speculative Decoding](https://arxiv.org/abs/2404.16710) (ACL 2024, Meta) — most directly related to this work. Trains with layer dropout and a shared early-exit loss, then uses early layers to draft and remaining layers to verify. Achieves up to 2.16x speedup.
 - Zhang et al., [Draft & Verify: Lossless Large Language Model Acceleration via Self-Speculative Decoding](https://aclanthology.org/2024.acl-long.607/) (ACL 2024) — self-speculative decoding by selectively skipping intermediate layers during drafting, no additional training required.
+
 
 ## Environment
 
