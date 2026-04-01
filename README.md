@@ -74,6 +74,13 @@ Evaluated on UltraChat prompts with chat-style decoding (temp=0.7, top_p=0.95):
 └── scripts/                  # Shell scripts for training sweeps and job launchers
 ```
 
+## References
+
+- Leviathan et al., [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192) (ICML 2023) — foundational speculative decoding paper showing 2-3x speedup by using a smaller draft model to propose tokens verified by the target model.
+- Chen et al., [Accelerating Large Language Model Decoding with Speculative Sampling](https://arxiv.org/abs/2302.01318) (2023) — independent and concurrent formulation of speculative decoding from DeepMind.
+- Elhoushi et al., [LayerSkip: Enabling Early Exit Inference and Self-Speculative Decoding](https://arxiv.org/abs/2404.16710) (ACL 2024, Meta) — most directly related to this work. Trains with layer dropout and a shared early-exit loss, then uses early layers to draft and remaining layers to verify. Achieves up to 2.16x speedup.
+- Zhang et al., [Draft & Verify: Lossless Large Language Model Acceleration via Self-Speculative Decoding](https://aclanthology.org/2024.acl-long.607/) (ACL 2024) — self-speculative decoding by selectively skipping intermediate layers during drafting, no additional training required.
+
 ## Environment
 
 - [NGC container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags): `nvcr.io/nvidia/pytorch:25.01-py3`
