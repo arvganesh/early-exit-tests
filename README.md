@@ -18,6 +18,8 @@ Under the right conditions (reasonable acceptance rate, well-chosen draft model)
 1. Exit at an intermediate layer and fine-tune the original LM head to exit early.
 2. Exit at an intermediate layer and fine-tune both the original LM head and the preceding transformer block (more capacity).
 
+DISCLAIMER: I did not coin the term "self-speculation". It was first mentioned in [LayerSkip](https://arxiv.org/pdf/2404.16710), where they used layer dropout and a special early exit loss during pre-training to achieve ~1.3-2x speedups on various tasks with self-speculation.
+
 ## Approach
 
 We used [LLaMA-3.2-1B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) (16 layers) as the base model. The model is truncated at a target layer, and a lightweight exit head is trained to approximate the full model's output distribution via KL divergence distillation. The exit head's weights are initialized to be equal to the exit head of the original model.
@@ -37,13 +39,12 @@ Evaluated on UltraChat prompts with chat-style decoding (temp=0.7, top_p=0.95):
 - Even the best configurations averaged ~0.12 accepted draft tokens per step (gamma=8), which is too low for wall-clock speedup. However, this doesn't tell the whole story since KV caches could be shared between the draft and the target to provide further speedup.
 
 **Key takeaways:**
-- Model capacity seems to be one of the bottlenecks. After increasing LR and # of epochs trained, the model did not show improvement. However, when adding capacity in the form of unfreezing the transformer layer at the exit point, the evals improved, albeit modestly. I hypothesize that the increased capacity explains the slight improvements in acceptance rate and perplexity.
+- Model capacity appears to be one of the bottlenecks. After increasing LR and # of epochs trained, the model did not show improvement. However, when adding capacity in the form of unfreezing the transformer layer at the exit point, the evals improved, albeit modestly. I hypothesize that the increased capacity (both in # of parameters and space of representable functions) of the transformer block explains the slight improvements in acceptance rate and perplexity.
 - However, my intuition also tells me that weight initialization used for the transformer block fine-tuning was sub-optimal (weights from the original model were unfrozen and then fine-tuned). One problem I see is that the layer $L$ was trained to expect inputs from layer $L-1$ and output to layer $L+1$. This is quite an "opinionated" initialization and differs greatly from what we *want* it to learn, which is to approximate the function represented by transformer layers $L + 1 ... N$. Similar to how resnets are trained, in hindsight, initializing the weights to be the identity seems more reasonable.
+- LayerSkip achieves >1x speedups using the same parameter count, while our post-hoc fine-tuning approach yielded minimal improvements. This suggests that the bottleneck is not the number of parameters but the representation format: the hidden states at layer $L$ are shaped by a 16-layer training objective, and a single fine-tuned block at the exit point cannot re-format them for direct decoding. LayerSkip avoids this problem entirely by training the model to produce exit-friendly representations from the start. This raises an interesting question: could lightweight adapters distributed across earlier layers gradually steer the residual stream toward a more decodable format, without requiring changes to pretraining?
 
 ## What I'd Do Next
 
-- **Deeper exit layers:** Test layers 13-14 (out of 16) to measure how acceptance rate scales with exit depth, which would help quantify how much capacity is needed for practical speedup.
-- **Larger models:** The capacity bottleneck may be less severe in models with more layers and richer intermediate representations.
 - **Early Exit Adapter:** To enable total weight sharing between the draft and target models, instead of fine-tuning the transformer block at the exit point, an early exit "adapter" could be trained. One idea I had to structure this adapter is to "interleave" it across the layers of the draft model so it has greater access to various parts of the residual stream. This adds room to examine the trade-off between size and placement of adapters and wall-clock improvement.
 
 ## Repository Structure
