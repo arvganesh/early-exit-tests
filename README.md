@@ -2,6 +2,8 @@
 
 We investigated the feasibility of "self-speculation", a variant of speculative decoding where a prefix of the model generates draft tokens and the remainder of the model verifies them. Specifically, we measured the acceptance rate of draft tokens produced by "exiting early" at various layers, and whether acceptance rates are high enough for wall-clock speedup over standard autoregressive decoding.
 
+> **AI Use Disclaimer: I used Claude Opus 4.6 as a partner to discuss ideas, help find and resolve bugs, and clean up the README.**
+
 ## Motivation
 
 Speculative decoding is a technique for speeding up LLM inference. It leverages the property that a forward pass on $n + k$ tokens is only slightly slower than on $n + 1$ tokens for small $k$. Instead of decoding one token at a time from an expensive target model, we generate $k$ candidate tokens with a cheaper draft model and verify them all at once. Here is the simplest version of the algorithm:
